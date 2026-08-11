@@ -1,0 +1,9 @@
+[project]
+name = "fastsacct"
+version = "0.1.0"
+description = "A fast, narrow replacement for `sacct -A ... -S ... -E ... -D -X -a --json` that calls slurmdb_jobs_get() directly via cffi, bypassing Slurm's data_parser plugin"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "cffi>=1.15",
+]
