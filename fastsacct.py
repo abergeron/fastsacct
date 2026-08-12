@@ -156,6 +156,12 @@ def detect_abi(library_path):
 # would mean depending on undocumented internal symbols; we'd rather fail
 # loudly on an unsupported format than silently drift from an unversioned
 # internal function.
+#
+# -S/-E values carry no timezone of their own (unlike --debug's usage_start/
+# usage_end log line, which is always UTC regardless of system tz), so they
+# are always interpreted as UTC -- never the process's local timezone. That
+# is only actually correct if the system timezone *is* UTC, which
+# require_utc_timezone() enforces at startup.
 # ---------------------------------------------------------------------------
 _ISO_RE = re.compile(
     r"^(?P<y>\d{4})-(?P<m>\d{2})-(?P<d>\d{2})"
@@ -163,9 +169,30 @@ _ISO_RE = re.compile(
 )
 
 
+def require_utc_timezone():
+    """
+    Refuse to run under a non-UTC system timezone. parse_time() below and
+    the --debug usage_start/usage_end log line both treat naive/epoch
+    timestamps as UTC; if the process's actual local timezone (TZ env var,
+    or /etc/localtime when TZ is unset) isn't UTC, -S/-E would silently be
+    interpreted in the wrong timezone instead of erroring.
+    """
+    offset = datetime.datetime.now().astimezone().utcoffset()
+    if offset != datetime.timedelta(0):
+        total_minutes = int(offset.total_seconds() // 60)
+        sign = "+" if total_minutes >= 0 else "-"
+        h, m = divmod(abs(total_minutes), 60)
+        raise SlurmdbError(
+            f"fastsacct requires the system timezone to be UTC, but the "
+            f"resolved local timezone offset is UTC{sign}{h:02d}:{m:02d} "
+            f"(TZ={os.environ.get('TZ')!r}). Set TZ=UTC (or configure the "
+            "system timezone as UTC) before running fastsacct."
+        )
+
+
 def parse_time(value):
     if value.lower() == "now":
-        return int(datetime.datetime.now().timestamp())
+        return int(datetime.datetime.now(datetime.timezone.utc).timestamp())
     m = _ISO_RE.match(value)
     if not m:
         raise argparse.ArgumentTypeError(
@@ -180,6 +207,7 @@ def parse_time(value):
         int(m["H"] or 0),
         int(m["M"] or 0),
         int(m["S"] or 0),
+        tzinfo=datetime.timezone.utc,
     )
     return int(dt.timestamp())
 
@@ -302,11 +330,22 @@ def parse_args(argv):
     return args
 
 
+class SlurmdbError(RuntimeError):
+    pass
+
+
+# ---------------------------------------------------------------------------
+# Turns a TRES "type" or "name" (e.g. "gres", "gpu:a100") into a JSON-key-
+# safe fragment for _tres_flat_fields below -- lowercased, non-alnum runs
+# (":", "/", ...) collapsed to a single "_".
+# ---------------------------------------------------------------------------
+def _tres_key_part(value):
+    return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_") if value else ""
+
+
 # ---------------------------------------------------------------------------
 # libslurmdb binding
 # ---------------------------------------------------------------------------
-class SlurmdbError(RuntimeError):
-    pass
 
 
 class Slurmdb:
@@ -343,8 +382,10 @@ class Slurmdb:
             } slurm_conf_t;
             extern slurm_conf_t slurm_conf;
 
-            /* Needed only for --full: resolving TRES/QOS ids to names.
-             * Both structs transcribed in full (not just a read prefix)
+            /* TRES and QOS id->name resolution are needed by both output
+             * modes now (flat expands tres_alloc_str/tres_req_str into
+             * allocated_/requested_ fields, and qosid into a qos name
+             * field). Both structs transcribed in full (not just a read prefix)
              * since we ffi.new() the *_cond_t ones ourselves and pass them
              * to the library -- under-declaring one of those would size
              * our allocation smaller than what the real function expects
@@ -464,15 +505,21 @@ class Slurmdb:
         self.conn = self.lib.slurmdb_connection_get(flags)
         if self.conn == self.ffi.NULL:
             raise SlurmdbError(self._strerror())
+        # Two RPCs, done for both modes now: flat expands tres_alloc_str/
+        # tres_req_str into allocated_*/requested_* fields (see
+        # _tres_flat_fields) and qosid into a qos name field, which need
+        # these same id->name maps.
+        self.tres_by_id = self.fetch_tres()
+        self.qos_by_id = self.fetch_qos()
+        self._debug(
+            f"fetched {len(self.tres_by_id)} TRES, {len(self.qos_by_id)} QOS "
+            "for id resolution"
+        )
         if full:
-            self.tres_by_id = self.fetch_tres()
-            self.qos_by_id = self.fetch_qos()
             self.assoc_list = abi.fetch_assoc_list(self.ffi, self.lib, self.conn)
             self._debug(
-                f"--full: fetched {len(self.tres_by_id)} TRES, "
-                f"{len(self.qos_by_id)} QOS, "
-                f"{len(self.assoc_list) if self.assoc_list else 0} associations "
-                "for id resolution"
+                f"--full: fetched {len(self.assoc_list) if self.assoc_list else 0} "
+                "associations for id resolution"
             )
 
     def _debug(self, msg):
@@ -634,9 +681,89 @@ class Slurmdb:
                     if val != self.ffi.NULL
                     else None
                 )
+            elif kind == "group":
+                # Same local NSS lookup (getgrgid, no RPC) --full uses for
+                # its "group" field -- cheap enough that skipping it here
+                # wouldn't meaningfully help flat mode's speed advantage,
+                # so we resolve it even though every other flat field is
+                # left raw (see README's "Two output modes").
+                out[json_key] = full_format.group_name(int(val))
+            elif kind == "flags":
+                # Same decoding --full uses for its "flags" field
+                # (PARSER_FLAG_ARRAY(SLURMDB_JOB_FLAGS)) -- pure bit
+                # twiddling against a fixed table, no RPC, so it's cheap
+                # enough to keep even in flat mode.
+                out[json_key] = full_format.job_flags(int(val))
+            elif kind == "job_state":
+                # Same decoding --full uses for its "state/current" field
+                # (base state name + any flag bits) -- pure bit twiddling
+                # against a fixed table, no RPC, so it's cheap enough to
+                # keep even in flat mode.
+                out[json_key] = full_format.job_state(int(val))
+            elif kind == "qos_name":
+                # Same id->name lookup --full's "qos" field uses (dict
+                # lookup against the one-time slurmdb_qos_get() fetch, no
+                # RPC per job), so it's cheap enough to keep even in flat
+                # mode -- replaces the raw qosid rather than sitting
+                # alongside it.
+                out[json_key] = full_format.qos_name(int(val), self.qos_by_id)
+            elif kind == "no_val32":
+                # Same NO_VAL/INFINITE sentinel check --full's no_val()
+                # does for this field, just collapsed to a single null
+                # instead of full's {"set","infinite","number"} wrapping.
+                ival = int(val)
+                out[json_key] = (
+                    None
+                    if ival in (full_format.NO_VAL, full_format.INFINITE)
+                    else ival
+                )
             else:
                 out[json_key] = int(val)
+        out.update(self._tres_flat_fields("allocated", out.get("tres_alloc_str")))
+        out.update(self._tres_flat_fields("requested", out.get("tres_req_str")))
+        out.update(self._exit_code_flat_fields("exitcode", out["exitcode"]))
         return out
+
+    def _exit_code_flat_fields(self, prefix, raw):
+        """Expand a wait-status-packed exitcode like job->exitcode into
+        "<prefix>_return_code"/"<prefix>_signal", reusing
+        full_format.process_exit_code for the WIFEXITED/WIFSIGNALED
+        decoding --full's exit_code/return_code and exit_code/signal/id
+        do -- just the bare number (or None if unset) instead of full's
+        {"set","infinite","number"} wrapping."""
+        decoded = full_format.process_exit_code(raw)
+        return_code = decoded["return_code"]
+        signal_id = decoded["signal"]["id"]
+        return {
+            f"{prefix}_return_code": (
+                return_code["number"] if return_code["set"] else None
+            ),
+            f"{prefix}_signal": signal_id["number"] if signal_id["set"] else None,
+        }
+
+    def _tres_flat_fields(self, prefix, raw):
+        """Expand a tres_alloc_str/tres_req_str like "1=4,2=17179869184,
+        1001=2" into {"<prefix>_cpu": 4, "<prefix>_mem": 17179869184,
+        "<prefix>_gres_gpu": 2, ...}, reusing full_format.parse_tres for
+        the id->{type,name} resolution and its int64 sign-fix (a count
+        like 18446744073709551614 is really -2, see parse_tres).
+
+        A GRES name optionally carries a model/type suffix after a colon
+        (e.g. "gpu:a100" -- the "a100" is which GPU model, not always
+        present). That suffix is kept out of the key -- "gres_gpu" stays
+        "gres_gpu" whether or not a model is reported -- and surfaced
+        instead as a separate "<prefix>_<key>_type" field, so consumers
+        can group by GRES name without the key varying per model."""
+        fields = {}
+        for entry in full_format.parse_tres(raw or "", self.tres_by_id):
+            type_key = _tres_key_part(entry["type"]) or f"id_{entry['id']}"
+            name, _, gres_type = entry["name"].partition(":")
+            name_key = _tres_key_part(name)
+            key = f"{type_key}_{name_key}" if name_key else type_key
+            fields[f"{prefix}_{key}"] = entry["count"]
+            if gres_type:
+                fields[f"{prefix}_{key}_type"] = gres_type
+        return fields
 
     def _job_to_full_dict(self, job, now):
         """Replicates the exact nested JSON shape plain `sacct --json`
@@ -755,6 +882,13 @@ class Slurmdb:
 
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
+
+    try:
+        require_utc_timezone()
+    except SlurmdbError as exc:
+        print(f"fastsacct: {exc}", file=sys.stderr)
+        return 1
+
     # sacct -A runs each entry through slurm_addto_char_list(), which trims
     # whitespace and lower-cases it (src/common/slurm_protocol_defs.c
     # _add_to_list()) before it ever reaches the accounting_storage/mysql

@@ -55,10 +55,58 @@ Useful flags for diagnosis, in rough order of how often you'll want them:
 
 **Flat (default)**: one flat JSON object per job, `json_key: raw_value`,
 using mostly-literal C struct field names as keys (`abi/*.py`'s
-`JOB_FIELDS`). Fast, simple, but the values are raw — `state` is an int,
-not `"COMPLETED"`; `flags` is a bitmask int, not decoded strings; `gid`/
-`qosid` are raw ids, not names. Good enough if your downstream consumer
-is your own code and you're fine post-processing raw fields yourself.
+`JOB_FIELDS`). Originally "no Python processing at all" for maximum speed;
+now "light Python processing" instead — a few fields get cheap, no-extra-
+RPC-per-job treatment where leaving them raw would just push the same
+parsing work onto every downstream consumer:
+
+- `qos` is resolved to a name (matching `--full`'s `qos` field) via the
+  same one-time `slurmdb_qos_get()` id->name map both modes now fetch --
+  no RPC per job. Replaces `qosid` rather than sitting alongside it.
+- `state` is a list of decoded state name strings (e.g. `["COMPLETED"]`,
+  or `["COMPLETED", "COMPLETING"]` while cleanup is still in flight),
+  matching `--full`'s `state/current` field -- same `full_format.job_state()`
+  base-state + flag-bit decode `--full` uses, no RPC, so it's cheap
+  enough to keep even in flat mode.
+- `flags` is a list of decoded flag name strings (e.g. `["STARTED_ON_SUBMIT"]`,
+  or `["NONE"]` when unset), matching `--full`'s `flags` field -- same
+  `full_format.job_flags()` bit-table decode `--full` uses, no RPC, so
+  it's cheap enough to keep even in flat mode.
+- `group` is resolved to a name (matching `--full`'s `group` field) via the
+  same local `getgrgid` NSS lookup `--full` uses -- no RPC. `gid` is still
+  emitted alongside it as the raw id.
+- `array_task_id` is `null`, not the raw `NO_VAL`/`INFINITE` sentinel
+  (`4294967294`/`4294967295`), for a non-array job -- same sentinel check
+  `--full`'s `no_val()` does for this field, just collapsed to a plain
+  `null` instead of full's `{"set","infinite","number"}` wrapping.
+- The epoch-timestamp/duration fields all carry a `time_` prefix --
+  `time_eligible`, `time_end`, `time_elapsed`, `time_start`, `time_submit`,
+  `time_suspended`, `time_timelimit` -- values are still the same raw
+  seconds/minutes, just renamed so they're easy to pick out from the rest
+  of the flat fields. The CPU-usage counters (`sys_cpu_sec`, `tot_cpu_sec`,
+  `user_cpu_sec`, and their `_usec` siblings) are left as-is -- they're
+  already qualified by `sys_`/`tot_`/`user_`.
+- `tres_alloc_str`/`tres_req_str` (e.g. `"1=4,2=17179869184,1001=2"`) are
+  still emitted raw, but also expanded into `allocated_<type>[_<name>]`/
+  `requested_<type>[_<name>]` fields (e.g. `allocated_cpu`, `allocated_mem`,
+  `allocated_gres_gpu`) using the one-time `slurmdb_tres_get()` id->name map
+  both modes now fetch. Sentinel counts that round-trip through the wire's
+  unsigned format (e.g. `18446744073709551614`, which is really `-2` --
+  see `full_format.parse_tres`) are reinterpreted back to a real negative
+  number, same as `--full` does. A GRES name's optional model/type suffix
+  (e.g. `"gpu:a100"`) is kept out of the key -- always `allocated_gres_gpu`,
+  never `allocated_gres_gpu_a100` -- and surfaced instead as a separate
+  `allocated_gres_gpu_type: "a100"` field when present.
+- `exitcode` (a Unix wait-status int) is still emitted raw, but also
+  expanded into `exitcode_return_code`/`exitcode_signal` -- the plain
+  number (or `null` if not applicable), reusing `full_format.
+  process_exit_code()`'s WIFEXITED/WIFSIGNALED decoding for the
+  WEXITSTATUS/WTERMSIG bit-twiddling but without full's
+  `{"set","infinite","number"}` wrapping or `status`/signal-name lookup.
+  `derived_ec` is left as raw only, for now.
+
+Good enough if your downstream consumer is your own code and you're fine
+post-processing the remaining raw fields yourself.
 
 **`--full`**: byte-for-byte the same nested JSON shape real `sacct --json`
 produces (state/flags/reason decoded to strings, NO_VAL-aware
