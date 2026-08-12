@@ -1,9 +1,10 @@
 /*
  * Mock libslurmdb for local testing of fastsacct.py without a real Slurm
- * install. Compiled against the ACTUAL slurm/slurm.h + slurm/slurmdb.h
- * headers from this checkout, so it shares the exact same struct layout
- * fastsacct.py's cffi cdef is meant to describe. This exercises both
- * directions of the ABI:
+ * install. This single source file is compiled three times, once per
+ * mock/include/<version>/slurm/{slurm.h,slurmdb.h} vendored from that
+ * release's real headers (see tests/conftest.py) -- each build shares the
+ * exact same struct layout fastsacct.py's cffi cdef for that release is
+ * meant to describe. This exercises both directions of the ABI:
  *
  *   - WRITE:  fastsacct.py fills in slurmdb_job_cond_t -> we print what we
  *             received, to confirm the Python side wrote it at the right
@@ -12,17 +13,18 @@
  *             them back, to confirm the Python side reads from the right
  *             offsets.
  *
- * It does NOT prove the vendored struct in abi/v25_05.py matches whatever
+ * It does NOT prove the vendored struct in abi/vXX_YY.py matches whatever
  * real libslurmdb.so is on a given cluster node -- only that the fastsacct
- * harness itself (arg parsing, list walking, JSON emission) is correct.
+ * harness itself (arg parsing, list walking, JSON emission) is correct,
+ * against a struct layout that (thanks to the per-version headers) really
+ * is that release's.
  *
  * Also provides slurmdb_tres_get()/slurmdb_qos_get() (real id/name tables,
  * matching the ids baked into make_job()'s tres_alloc_str/tres_req_str/
- * qosid) so --full's id-resolution path has something real to resolve
- * against. slurmdb_associations_get() is a stub, deliberately NOT
- * exercised with real data -- see its own comment for why (24.11's
- * slurmdb_assoc_rec_t has a different layout than whatever slurmdb.h is
- * checked out locally, which this mock is compiled against).
+ * qosid) so the flat schema's id-resolution path has something real to
+ * resolve against. slurmdb_associations_get()/slurmdb_destroy_assoc_rec()
+ * are unused stubs, left over from a removed --full mode that fastsacct.py
+ * no longer calls -- kept only so this file still builds standalone.
  */
 #include <slurm/slurm.h>
 #include <slurm/slurmdb.h>
@@ -221,6 +223,26 @@ static slurmdb_job_rec_t *make_job(uint32_t jobid, const char *account,
     j->tot_cpu_sec = 120;
     j->user_cpu_sec = 100;
     j->sys_cpu_sec = 20;
+    j->lineage = strdup("/some/lineage/path");
+#if MOCK_API_MAJOR == 42
+    /* 24.11-only field, removed in 25.05 (superseded by lineage above) --
+     * see abi/v24_11.py's docstring. Only compiles/exists in this branch
+     * because mock/include/24.11/slurm/slurmdb.h is the real 24.11 header,
+     * which still declares it. */
+    j->lft = 7;
+#else
+    /* 25.05+-only fields, didn't exist in 24.11 -- see abi/v24_11.py's
+     * docstring. Only compile/exist in this branch because
+     * mock/include/{25.05,25.11}/slurm/slurmdb.h are the real 25.05/25.11
+     * headers, which declare them. */
+    j->resv_req = strdup("normal");
+    j->segment_size = 8;
+#endif
+    /* Last field in the struct in every release -- set explicitly so a
+     * wrong field offset anywhere upstream of it (e.g. from building
+     * against the wrong abi/vXX_YY.py CDEF) shows up here as garbage
+     * instead of going unnoticed. */
+    j->work_dir = strdup("/home/someuser");
     return j;
 }
 
