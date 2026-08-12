@@ -19,11 +19,6 @@ Regenerating this file for a new Slurm release:
      if you want them in the output, to JOB_FIELDS.
 """
 
-# fastsacct.py puts its own directory on sys.path before importing this
-# package, so this plain import resolves fine -- no path hacking needed
-# here as long as this module is only ever reached via fastsacct.py.
-import full_format
-
 SLURM_ABI_VERSION = "25.05"
 
 # Value returned by the public `slurm_api_version()` (slurm/slurm.h) for
@@ -186,48 +181,12 @@ typedef struct {
 } slurmdb_job_rec_t;
 """
 
-# (json_key, c_field, kind) -- kind drives how api.py converts the raw
-# cffi value. "str" fields are NULL-safe. time/u32/u64/u16/i32 map
-# directly to their C type; NO_VAL sentinels are left as-is (raw
-# integers) rather than translated, matching the "flat/lean" schema
-# decision -- callers that need NO_VAL-aware semantics should use real
-# sacct --json.
-# --- JOB_ASSOC_ID ("association", --full only) ---
-# This is the one piece of JOB rendering that genuinely differs between
-# 24.11 and 25.05 (see abi/v24_11.py's comment for the other side). On
-# 25.05, DUMP_FUNC(JOB_ASSOC_ID) (parsers.c:1351-1361) needs no RPC at all --
-# it synthesizes a mostly-empty association object straight from fields
-# already on the job record: only `cluster`/`id` are ever filled in;
-# account/partition/user are always empty regardless of what's actually
-# available (yes, this means real sacct --json on 25.05 also never
-# populates those three for this field -- that's not a shortcut we're
-# taking, it's what the real output looks like).
-ASSOC_CDEF = ""
-
-
-def fetch_assoc_list(ffi, lib, conn):
-    return None  # unused on 25.05 -- see ASSOC_CDEF comment
-
-
-def job_assoc(job, ffi, assoc_list):
-    return {
-        "account": "",
-        "cluster": ffi.string(job.cluster).decode() if job.cluster != ffi.NULL else "",
-        "partition": "",
-        "user": "",
-        "id": int(job.associd),
-    }
-
-
-# --- %N in stdin/stdout/stderr expansion (--full only) ---
-# 25.05's slurmdb_expand_job_stdio_fields() takes %N from the first node of
-# job->nodes (hostlist_shift() on it), which is always populated by
-# slurmdb_jobs_get() regardless of whether steps were fetched.
-def stdio_node(job, ffi):
-    nodes = ffi.string(job.nodes).decode() if job.nodes != ffi.NULL else ""
-    return full_format.hostlist_first(nodes)
-
-
+# (json_key, c_field, kind) -- kind drives how fastsacct.py's
+# Slurmdb._job_to_dict() converts the raw cffi value. "str" fields are
+# NULL-safe; the plain numeric kinds (u32/u64/u16/time) map directly to
+# their C type; the rest ("group", "flags", "job_state", "qos_name",
+# "no_val32") get the cheap, no-RPC-per-job decoding described next to
+# their handling in _job_to_dict.
 JOB_FIELDS = [
     ("account", "account", "str"),
     ("admin_comment", "admin_comment", "str"),

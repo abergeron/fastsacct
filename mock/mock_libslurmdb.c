@@ -202,13 +202,15 @@ static slurmdb_job_rec_t *make_job(uint32_t jobid, const char *account,
     j->req_cpus = 4;
     j->alloc_nodes = 2;
     /* real wire format is always "<tres_id>=<count>,..." (numeric ids,
-     * never names) -- see fastsacct's --full comments for why. 1=cpu,
+     * never names) -- see fastsacct.py's parse_tres() for why. 1=cpu,
      * 2=mem (bytes), 4=node, matching the fake slurmdb_tres_get() table
      * below. */
     j->tres_alloc_str = strdup("1=4,2=17179869184,4=2");
     j->tres_req_str = strdup("1=4,2=17179869184,4=2");
-    /* MEM_PER_CPU (bit 63) tagged: 4096 MB per cpu, to exercise the
-     * required/memory_per_cpu branch (see full_format.mem_per_cpu()). */
+    /* MEM_PER_CPU (bit 63) tagged: 4096 MB per cpu. fastsacct's flat
+     * output doesn't split this into per-cpu/per-node fields -- req_mem
+     * is emitted raw -- but the bit is still set here to match a real
+     * job record's shape. */
     j->req_mem = 0x8000000000000000ULL | 4096;
     j->exitcode = 0;
     j->priority = 100;

@@ -16,31 +16,28 @@ behave differently under plain sacct is rejected rather than silently
 mishandled. Any other sacct flag is a hard error: this is a narrow
 drop-in for one invocation shape, not a general sacct replacement.
 
-Output is a flat JSON schema (plain scalars, not sacct's nested
-{"set":...,"infinite":...,"number":...} OpenAPI shape) -- see
-`meta.source` in the output to distinguish it from real `sacct --json`.
+Output is a flat JSON schema: one flat object per job, mostly plain
+scalars (not sacct --json's nested {"set":...,"infinite":...,"number":...}
+OpenAPI shape) with a handful of fields decoded to strings/lists or
+expanded into sibling fields where that's cheap to do without an RPC per
+job -- see README.md's "Output schema" section for the full list.
 """
 
 import argparse
 import datetime
+import grp
 import json
 import os
 import re
 import subprocess
 import sys
-import time
 
 import cffi
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import full_format
 from abi import v24_11, v25_05, v25_11
 
 SCHEMA_VERSION = "fastsacct-flat-v1"
-# --full's schema is meant to be sacct --json's actual nested schema, not
-# a fastsacct-invented one -- versioned separately since its shape tracks
-# upstream's data_parser output, not this flat schema's own evolution.
-FULL_SCHEMA_VERSION = "sacct-json-compat-v1"
 
 # One entry per Slurm release we've built an abi/vXX_YY.py module for.
 # Add new releases here as they're built (see abi/v25_05.py's docstring
@@ -285,17 +282,6 @@ def build_argparser():
         "count to stderr before any Python-side processing",
     )
     p.add_argument(
-        "--full",
-        action="store_true",
-        default=False,
-        help="emit sacct --json's exact nested schema (state/reason/flags "
-        "as decoded strings, NO_VAL-aware {set,infinite,number} wrapping, "
-        "uid/gid/qos name resolution, TRES parsing, stdio %%-expansion) "
-        "instead of the default flat schema. Slower: two extra one-time "
-        "RPCs (TRES + QOS lists) plus per-job Python-side formatting -- "
-        "see README for the flat-vs-full tradeoff. Default: flat.",
-    )
-    p.add_argument(
         "--abi",
         choices=sorted(ABI_REGISTRY),
         default=None,
@@ -335,6 +321,179 @@ class SlurmdbError(RuntimeError):
 
 
 # ---------------------------------------------------------------------------
+# Flat-output decode helpers -- state/flags/qos/group/TRES/exit-code fields
+# that are cheap to resolve from raw job_rec_t values (no RPC per job) but
+# not worth leaving as opaque ints for every downstream consumer to
+# re-decode. Ported from sacct's own `data_parser` plugin
+# (src/plugins/data_parser/v0.0.4{2,3,4}/parsers.c) and validated
+# field-by-field against real `sacct --json` output on a real cluster
+# (mila, Slurm 25.05.2, 2003 real jobs) back when this logic fed a --full
+# mode that has since been removed (flat is now the only output). Every
+# table/algorithm here was confirmed byte-for-byte identical between Slurm
+# 24.11 (data_parser v0.0.42), 25.05 (v0.0.43), and 25.11 (v0.0.44) by
+# direct diff of parsers.c -- that's why this is version-independent
+# (unlike abi/*.py) -- with two purely additive exceptions folded in
+# directly below (a new SLURMDB_JOB_FLAGS bit and a new JOB_STATE flag
+# bit, both added in 25.11; see the comments next to
+# `_JOB_STATE_FLAG_BITS`).
+# ---------------------------------------------------------------------------
+
+# NO_VAL/INFINITE sentinels, from slurm/slurm.h.
+NO_VAL, INFINITE = 0xFFFFFFFE, 0xFFFFFFFF
+
+# job state -- PARSER_FLAG_ARRAY(JOB_STATE) in parsers.c; base-state values
+# from enum job_states, flag-bit values from the JOB_* SLURM_BIT macros,
+# both in slurm/slurm.h (public, version-independent header).
+_JOB_STATE_BASE = {
+    0: "PENDING",
+    1: "RUNNING",
+    2: "SUSPENDED",
+    3: "COMPLETED",
+    4: "CANCELLED",
+    5: "FAILED",
+    6: "TIMEOUT",
+    7: "NODE_FAIL",
+    8: "PREEMPTED",
+    9: "BOOT_FAIL",
+    10: "DEADLINE",
+    11: "OUT_OF_MEMORY",
+    # 12 = JOB_END: a real base-state slot, but marked `hidden` in the
+    # data_parser table -- real sacct never emits it either.
+}
+# (bit, name), in the table's declared order (order matters: it's the order
+# names get appended to the output array).
+_JOB_STATE_FLAG_BITS = [
+    (8, "LAUNCH_FAILED"),
+    (10, "REQUEUED"),
+    (11, "REQUEUE_HOLD"),
+    (12, "SPECIAL_EXIT"),
+    (13, "RESIZING"),
+    (14, "CONFIGURING"),
+    (15, "COMPLETING"),
+    (16, "STOPPED"),
+    (17, "RECONFIG_FAIL"),
+    (18, "POWER_UP_NODE"),
+    (19, "REVOKED"),
+    (20, "REQUEUE_FED"),
+    (21, "RESV_DEL_HOLD"),
+    (22, "SIGNALING"),
+    (23, "STAGE_OUT"),
+    (24, "EXPEDITING"),  # JOB_EXPEDITING, added in Slurm 25.11
+]
+
+
+def job_state(raw):
+    out = []
+    base = _JOB_STATE_BASE.get(raw & 0xFF)
+    if base:
+        out.append(base)
+    for bit, name in _JOB_STATE_FLAG_BITS:
+        if raw & (1 << bit):
+            out.append(name)
+    return out
+
+
+# job flags -- slurmdb_job_rec_t.flags (NOT job_cond->flags/db_flags), via
+# PARSER_FLAG_ARRAY(SLURMDB_JOB_FLAGS) in parsers.c; values from
+# slurm/slurmdb.h SLURMDB_JOB_FLAG_*.
+def job_flags(raw):
+    out = []
+    if raw == 0x0:
+        out.append("NONE")
+    if raw == 0xF:
+        out.append("CLEAR_SCHEDULING")
+    for bit, name in (
+        (0, "NOT_SET"),
+        (1, "STARTED_ON_SUBMIT"),
+        (2, "STARTED_ON_SCHEDULE"),
+        (3, "STARTED_ON_BACKFILL"),
+        (4, "START_RECEIVED"),
+        (5, "JOB_ALTERED"),  # SLURMDB_JOB_FLAG_ALTERED, added in Slurm 25.11
+    ):
+        if raw & (1 << bit):
+            out.append(name)
+    return out
+
+
+# process exit code -- job->exitcode / job->derived_ec, packed like a Unix
+# wait-status int. Ported from DUMP_FUNC(PROCESS_EXIT_CODE): WIFEXITED is
+# "low 7 bits are 0", WEXITSTATUS is "next 8 bits", WIFSIGNALED/WTERMSIG use
+# the low 7 bits as a signal number. Returns the plain return code / signal
+# number, `None` for whichever doesn't apply (including the WCOREDUMP and
+# still-pending cases, which have neither).
+def process_exit_code(raw):
+    low7 = raw & 0x7F
+    if raw == NO_VAL:
+        rc, sig = None, None  # still pending
+    elif low7 == 0:
+        rc, sig = (raw >> 8) & 0xFF, None
+    elif low7 != 0x7F:
+        rc, sig = None, low7  # signaled
+    else:
+        rc, sig = None, None  # core-dumped, or an invalid wait status
+    return {"return_code": rc, "signal": sig}
+
+
+# gid -> name resolution -- DUMP_FUNC(GROUP_ID): a local NSS lookup
+# (getgrgid), not an RPC. Non-complex mode (what plain `sacct --json` used
+# to run in) falls back to "" on a failed lookup.
+def group_name(gid):
+    try:
+        return grp.getgrgid(gid).gr_name
+    except KeyError:
+        return ""
+
+
+# QOS id -> name. Needs a slurmdb_qos_get() fetched once per run (see
+# Slurmdb.qos_by_id below) -- ported from DUMP_FUNC(QOS_ID).
+def qos_name(qid, qos_by_id):
+    if not qid or qid == INFINITE:
+        return ""
+    q = qos_by_id.get(qid)
+    if q is None:
+        return "Unknown"
+    return q["name"] or str(q["id"])
+
+
+# TRES string parsing -- tres_alloc_str/tres_req_str are always
+# "<tres_id>=<count>,<tres_id>=<count>,..." (numeric ids, never names) on
+# the wire; resolving id -> {type, name} needs a slurmdb_tres_get() fetched
+# once per run (see Slurmdb.tres_by_id below).
+def parse_tres(raw, tres_by_id):
+    if not raw:
+        return []
+    out = []
+    for pair in raw.split(","):
+        if not pair:
+            continue
+        tid_str, _, count_str = pair.partition("=")
+        tid = int(tid_str)
+        count = int(count_str)
+        # tres_alloc_str/tres_req_str are written with an UNSIGNED format
+        # specifier (assoc_mgr_make_tres_str_from_array(): "%u=%"PRIu64),
+        # but the data_parser dumps a TRES entry's "count" as INT64
+        # (parsers.c PARSER_ARRAY(TRES): add_parse(INT64, count, "count",
+        # ...)) -- a sentinel like "unknown/not tracked" (-2, for e.g.
+        # energy on nodes without power monitoring) round-trips through the
+        # wire as its unsigned 64-bit bit pattern (18446744073709551614),
+        # and real sacct reinterprets it back to -2. Confirmed against real
+        # sacct --json output -- without this, we'd show the raw unsigned
+        # value instead.
+        if count >= 2**63:
+            count -= 2**64
+        info = tres_by_id.get(tid, {})
+        out.append(
+            {
+                "type": info.get("type", ""),
+                "name": info.get("name", ""),
+                "id": tid,
+                "count": count,
+            }
+        )
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Turns a TRES "type" or "name" (e.g. "gres", "gpu:a100") into a JSON-key-
 # safe fragment for _tres_flat_fields below -- lowercased, non-alnum runs
 # (":", "/", ...) collapsed to a single "_".
@@ -349,14 +508,11 @@ def _tres_key_part(value):
 
 
 class Slurmdb:
-    def __init__(self, library_path, abi, debug=False, full=False):
+    def __init__(self, library_path, abi, debug=False):
         self.abi = abi
         self.debug = debug
-        self.full = full
         self.ffi = cffi.FFI()
         self.ffi.cdef(abi.CDEF)
-        if full and abi.ASSOC_CDEF:
-            self.ffi.cdef(abi.ASSOC_CDEF)
         # Diagnostic-only: slurm_conf is the same global struct auth/accounting
         # plugins reference (see the RTLD_GLOBAL note below) -- reading its
         # first few fields after slurm_init() tells us which accounting
@@ -382,12 +538,12 @@ class Slurmdb:
             } slurm_conf_t;
             extern slurm_conf_t slurm_conf;
 
-            /* TRES and QOS id->name resolution are needed by both output
-             * modes now (flat expands tres_alloc_str/tres_req_str into
-             * allocated_/requested_ fields, and qosid into a qos name
-             * field). Both structs transcribed in full (not just a read prefix)
-             * since we ffi.new() the *_cond_t ones ourselves and pass them
-             * to the library -- under-declaring one of those would size
+            /* TRES id->name resolution feeds _tres_flat_fields's
+             * allocated_/requested_ fields; QOS id->name resolution feeds
+             * the "qos" field. Both structs transcribed in full (not just a
+             * read prefix) since we ffi.new() the *_cond_t ones ourselves
+             * and pass them to the library -- under-declaring one of those
+             * would size
              * our allocation smaller than what the real function expects
              * to read/write, corrupting adjacent heap memory. Confirmed
              * against slurm/slurmdb.h (25.05); version-independent for the
@@ -505,22 +661,15 @@ class Slurmdb:
         self.conn = self.lib.slurmdb_connection_get(flags)
         if self.conn == self.ffi.NULL:
             raise SlurmdbError(self._strerror())
-        # Two RPCs, done for both modes now: flat expands tres_alloc_str/
-        # tres_req_str into allocated_*/requested_* fields (see
-        # _tres_flat_fields) and qosid into a qos name field, which need
-        # these same id->name maps.
+        # Two one-time RPCs: flat expands tres_alloc_str/tres_req_str into
+        # allocated_*/requested_* fields (see _tres_flat_fields) and qosid
+        # into a qos name field, which need these same id->name maps.
         self.tres_by_id = self.fetch_tres()
         self.qos_by_id = self.fetch_qos()
         self._debug(
             f"fetched {len(self.tres_by_id)} TRES, {len(self.qos_by_id)} QOS "
             "for id resolution"
         )
-        if full:
-            self.assoc_list = abi.fetch_assoc_list(self.ffi, self.lib, self.conn)
-            self._debug(
-                f"--full: fetched {len(self.assoc_list) if self.assoc_list else 0} "
-                "associations for id resolution"
-            )
 
     def _debug(self, msg):
         if self.debug:
@@ -557,9 +706,9 @@ class Slurmdb:
             self.lib.slurm_list_destroy(result)
 
     def fetch_tres(self):
-        """id -> {"type", "name"}, for --full's TRES string resolution.
-        Mirrors slurmdb_helpers.c's own `slurmdb_tres_cond_t cond = {
-        .with_deleted = 1 }`."""
+        """id -> {"type", "name"}, for TRES string resolution (see
+        _tres_flat_fields). Mirrors slurmdb_helpers.c's own
+        `slurmdb_tres_cond_t cond = { .with_deleted = 1 }`."""
         cond = self.ffi.new("slurmdb_tres_cond_t *")
         cond.with_deleted = 1
         result = self.lib.slurmdb_tres_get(self.conn, cond)
@@ -569,7 +718,7 @@ class Slurmdb:
         }
 
     def fetch_qos(self):
-        """id -> {"id", "name"}, for --full's QOS name resolution. Mirrors
+        """id -> {"id", "name"}, for the "qos" field's name resolution. Mirrors
         slurmdb_helpers.c's `slurmdb_qos_cond_t cond = { .flags =
         QOS_COND_FLAG_WITH_DELETED }` -- without it, a job whose QOS was
         later deleted would resolve to "Unknown" here but to its real name
@@ -652,7 +801,6 @@ class Slurmdb:
             raise SlurmdbError(self._strerror())
 
         jobs = []
-        now = int(time.time())
         itr = self.lib.slurm_list_iterator_create(result)
         try:
             while True:
@@ -660,11 +808,7 @@ class Slurmdb:
                 if job_ptr == self.ffi.NULL:
                     break
                 job = self.ffi.cast("slurmdb_job_rec_t *", job_ptr)
-                jobs.append(
-                    self._job_to_full_dict(job, now)
-                    if self.full
-                    else self._job_to_dict(job)
-                )
+                jobs.append(self._job_to_dict(job))
         finally:
             self.lib.slurm_list_iterator_destroy(itr)
             self.lib.slurm_list_destroy(result)
@@ -682,41 +826,26 @@ class Slurmdb:
                     else None
                 )
             elif kind == "group":
-                # Same local NSS lookup (getgrgid, no RPC) --full uses for
-                # its "group" field -- cheap enough that skipping it here
-                # wouldn't meaningfully help flat mode's speed advantage,
-                # so we resolve it even though every other flat field is
-                # left raw (see README's "Two output modes").
-                out[json_key] = full_format.group_name(int(val))
+                # A local NSS lookup (getgrgid), not an RPC -- cheap enough
+                # to resolve even though every other flat field is left raw.
+                out[json_key] = group_name(int(val))
             elif kind == "flags":
-                # Same decoding --full uses for its "flags" field
-                # (PARSER_FLAG_ARRAY(SLURMDB_JOB_FLAGS)) -- pure bit
-                # twiddling against a fixed table, no RPC, so it's cheap
-                # enough to keep even in flat mode.
-                out[json_key] = full_format.job_flags(int(val))
+                # PARSER_FLAG_ARRAY(SLURMDB_JOB_FLAGS) decoding -- pure bit
+                # twiddling against a fixed table, no RPC.
+                out[json_key] = job_flags(int(val))
             elif kind == "job_state":
-                # Same decoding --full uses for its "state/current" field
-                # (base state name + any flag bits) -- pure bit twiddling
-                # against a fixed table, no RPC, so it's cheap enough to
-                # keep even in flat mode.
-                out[json_key] = full_format.job_state(int(val))
+                # Base state name + any flag bits -- pure bit twiddling
+                # against a fixed table, no RPC.
+                out[json_key] = job_state(int(val))
             elif kind == "qos_name":
-                # Same id->name lookup --full's "qos" field uses (dict
-                # lookup against the one-time slurmdb_qos_get() fetch, no
-                # RPC per job), so it's cheap enough to keep even in flat
-                # mode -- replaces the raw qosid rather than sitting
-                # alongside it.
-                out[json_key] = full_format.qos_name(int(val), self.qos_by_id)
+                # Dict lookup against the one-time slurmdb_qos_get() fetch,
+                # no RPC per job -- replaces the raw qosid rather than
+                # sitting alongside it.
+                out[json_key] = qos_name(int(val), self.qos_by_id)
             elif kind == "no_val32":
-                # Same NO_VAL/INFINITE sentinel check --full's no_val()
-                # does for this field, just collapsed to a single null
-                # instead of full's {"set","infinite","number"} wrapping.
+                # NO_VAL/INFINITE sentinel collapsed to a plain null.
                 ival = int(val)
-                out[json_key] = (
-                    None
-                    if ival in (full_format.NO_VAL, full_format.INFINITE)
-                    else ival
-                )
+                out[json_key] = None if ival in (NO_VAL, INFINITE) else ival
             else:
                 out[json_key] = int(val)
         out.update(self._tres_flat_fields("allocated", out.get("tres_alloc_str")))
@@ -726,27 +855,20 @@ class Slurmdb:
 
     def _exit_code_flat_fields(self, prefix, raw):
         """Expand a wait-status-packed exitcode like job->exitcode into
-        "<prefix>_return_code"/"<prefix>_signal", reusing
-        full_format.process_exit_code for the WIFEXITED/WIFSIGNALED
-        decoding --full's exit_code/return_code and exit_code/signal/id
-        do -- just the bare number (or None if unset) instead of full's
-        {"set","infinite","number"} wrapping."""
-        decoded = full_format.process_exit_code(raw)
-        return_code = decoded["return_code"]
-        signal_id = decoded["signal"]["id"]
+        "<prefix>_return_code"/"<prefix>_signal" via process_exit_code's
+        WIFEXITED/WIFSIGNALED decoding."""
+        decoded = process_exit_code(raw)
         return {
-            f"{prefix}_return_code": (
-                return_code["number"] if return_code["set"] else None
-            ),
-            f"{prefix}_signal": signal_id["number"] if signal_id["set"] else None,
+            f"{prefix}_return_code": decoded["return_code"],
+            f"{prefix}_signal": decoded["signal"],
         }
 
     def _tres_flat_fields(self, prefix, raw):
         """Expand a tres_alloc_str/tres_req_str like "1=4,2=17179869184,
         1001=2" into {"<prefix>_cpu": 4, "<prefix>_mem": 17179869184,
-        "<prefix>_gres_gpu": 2, ...}, reusing full_format.parse_tres for
-        the id->{type,name} resolution and its int64 sign-fix (a count
-        like 18446744073709551614 is really -2, see parse_tres).
+        "<prefix>_gres_gpu": 2, ...}, reusing parse_tres for the
+        id->{type,name} resolution and its int64 sign-fix (a count like
+        18446744073709551614 is really -2, see parse_tres).
 
         A GRES name optionally carries a model/type suffix after a colon
         (e.g. "gpu:a100" -- the "a100" is which GPU model, not always
@@ -755,7 +877,7 @@ class Slurmdb:
         instead as a separate "<prefix>_<key>_type" field, so consumers
         can group by GRES name without the key varying per model."""
         fields = {}
-        for entry in full_format.parse_tres(raw or "", self.tres_by_id):
+        for entry in parse_tres(raw or "", self.tres_by_id):
             type_key = _tres_key_part(entry["type"]) or f"id_{entry['id']}"
             name, _, gres_type = entry["name"].partition(":")
             name_key = _tres_key_part(name)
@@ -764,120 +886,6 @@ class Slurmdb:
             if gres_type:
                 fields[f"{prefix}_{key}_type"] = gres_type
         return fields
-
-    def _job_to_full_dict(self, job, now):
-        """Replicates the exact nested JSON shape plain `sacct --json`
-        produces for a JOB record -- see full_format.py's module docstring
-        and abi/*.py's JOB_ASSOC_ID/stdio_node comments for what's shared
-        vs. per-ABI-version. Field-by-field correspondence to
-        src/plugins/data_parser/v0.0.43/parsers.c's PARSER_ARRAY(JOB)
-        (7498-7579); fields marked `add_skip()` there (db_index, env,
-        first_step_ptr, show_full, uid, user, wckeyid) are intentionally
-        absent here too."""
-        ffi = self.ffi
-        ff = full_format
-
-        def s(v):
-            return ffi.string(v).decode(errors="replace") if v != ffi.NULL else ""
-
-        out = {}
-
-        def setp(path, value):
-            ff.setpath(out, path, value)
-
-        setp("account", s(job.account))
-        setp("comment/administrator", s(job.admin_comment))
-        setp("allocation_nodes", int(job.alloc_nodes))
-        setp("array/job_id", int(job.array_job_id))
-        setp("array/limits/max/running/tasks", int(job.array_max_tasks))
-        setp("array/task_id", ff.no_val(int(job.array_task_id), 32))
-        setp("array/task", s(job.array_task_str))
-        setp(
-            "association",
-            self.abi.job_assoc(job, ffi, getattr(self, "assoc_list", None)),
-        )
-        setp("block", s(job.blockid))
-        setp("cluster", s(job.cluster))
-        setp("constraints", s(job.constraints))
-        setp("container", s(job.container))
-        setp("derived_exit_code", ff.process_exit_code(int(job.derived_ec)))
-        setp("comment/job", s(job.derived_es))
-        setp("time/elapsed", int(job.elapsed))
-        setp("time/eligible", int(job.eligible))
-        setp("time/end", int(job.end))
-        setp("exit_code", ff.process_exit_code(int(job.exitcode)))
-        setp("extra", s(job.extra))
-        setp("failed_node", s(job.failed_node))
-        setp("flags", ff.job_flags(int(job.flags)))
-        setp("group", ff.group_name(int(job.gid)))
-        setp("het/job_id", int(job.het_job_id))
-        setp("het/job_offset", ff.no_val(int(job.het_job_offset), 32))
-        setp("job_id", int(job.jobid))
-        setp("name", s(job.jobname))
-        setp("licenses", s(job.licenses))
-        setp("mcs/label", s(job.mcs_label))
-        setp("nodes", s(job.nodes))
-        setp("partition", s(job.partition))
-        setp("hold", ff.hold(int(job.priority)))
-        setp("priority", ff.no_val(int(job.priority), 32))
-        setp("qos", ff.qos_name(int(job.qosid), self.qos_by_id))
-        setp("qosreq", s(job.qos_req))
-        setp("required/CPUs", int(job.req_cpus))
-        setp("required/memory_per_cpu", ff.mem_per_cpu(int(job.req_mem)))
-        setp("required/memory_per_node", ff.mem_per_node(int(job.req_mem)))
-        setp("kill_request_user", ff.user_name(int(job.requid)))
-        setp("restart_cnt", int(job.restart_cnt))
-        setp("reservation/id", int(job.resvid))
-        setp("reservation/name", s(job.resv_name))
-        if hasattr(job, "resv_req"):  # 25.05 only
-            setp("reservation/requested", s(job.resv_req))
-        setp(
-            "time/planned",
-            ff.planned_time(int(job.eligible), int(job.start), int(job.end), now),
-        )
-        setp("script", s(job.script))
-        if hasattr(job, "segment_size"):  # 25.05 only
-            setp("segment_size", int(job.segment_size))
-        node = self.abi.stdio_node(job, ffi)
-        stdio_ctx = {
-            "jobid": int(job.jobid),
-            "array_job_id": int(job.array_job_id),
-            "array_task_id": int(job.array_task_id),
-            "jobname": s(job.jobname),
-            "user": s(job.user),
-            "node": node,
-        }
-        setp("stdin_expanded", ff.expand_stdio(s(job.std_in), stdio_ctx))
-        setp("stdout_expanded", ff.expand_stdio(s(job.std_out), stdio_ctx))
-        setp("stderr_expanded", ff.expand_stdio(s(job.std_err), stdio_ctx))
-        setp("stdout", s(job.std_out))
-        setp("stderr", s(job.std_err))
-        setp("stdin", s(job.std_in))
-        setp("time/start", int(job.start))
-        setp("state/current", ff.job_state(int(job.state)))
-        setp("state/reason", ff.job_state_reason(int(job.state_reason_prev)))
-        # fastsacct always sets JOBCOND_FLAG_NO_STEP (mirrors sacct -X, a
-        # required flag -- see module docstring), so the server never
-        # populates job->steps for any query fastsacct can issue.
-        setp("steps", [])
-        setp("time/submission", int(job.submit))
-        setp("submit_line", s(job.submit_line))
-        setp("time/suspended", int(job.suspended))
-        setp("comment/system", s(job.system_comment))
-        setp("time/system/seconds", int(job.sys_cpu_sec))
-        setp("time/system/microseconds", int(job.sys_cpu_usec))
-        setp("time/limit", ff.no_val(int(job.timelimit), 32))
-        setp("time/total/seconds", int(job.tot_cpu_sec))
-        setp("time/total/microseconds", int(job.tot_cpu_usec))
-        setp("tres/allocated", ff.parse_tres(s(job.tres_alloc_str), self.tres_by_id))
-        setp("tres/requested", ff.parse_tres(s(job.tres_req_str), self.tres_by_id))
-        setp("used_gres", s(job.used_gres))
-        setp("user", ff.job_user(s(job.user), int(job.uid)))
-        setp("time/user/seconds", int(job.user_cpu_sec))
-        setp("time/user/microseconds", int(job.user_cpu_usec))
-        setp("wckey", ff.wckey_tag(s(job.wckey)))
-        setp("working_directory", s(job.work_dir))
-        return out
 
 
 def main(argv=None):
@@ -903,7 +911,7 @@ def main(argv=None):
         print(f"fastsacct: {exc}", file=sys.stderr)
         return 1
 
-    db = Slurmdb(args.library, abi, debug=args.debug, full=args.full)
+    db = Slurmdb(args.library, abi, debug=args.debug)
     try:
         jobs = db.jobs_get(accounts, args.starttime, args.endtime)
     except SlurmdbError as exc:
@@ -915,7 +923,7 @@ def main(argv=None):
     output = {
         "meta": {
             "source": "fastsacct",
-            "schema_version": FULL_SCHEMA_VERSION if args.full else SCHEMA_VERSION,
+            "schema_version": SCHEMA_VERSION,
             "slurm_abi_version": abi.SLURM_ABI_VERSION,
         },
         "jobs": jobs,

@@ -2,46 +2,23 @@
 ABI description for Slurm 25.11.x.
 
 See abi/v25_05.py for the general regeneration notes. This file was built by
-diffing `slurmdb_job_rec_t` / `slurmdb_job_cond_t` / `slurmdb_assoc_rec_t` /
-`slurmdb_tres_rec_t` in `origin/slurm-25.11:slurm/slurmdb.h` against the
-25.05 branch:
+diffing `slurmdb_job_rec_t` / `slurmdb_job_cond_t` in
+`origin/slurm-25.11:slurm/slurmdb.h` against the 25.05 branch: both are
+byte-for-byte identical to 25.05 (confirmed via diff) -- CDEF/JOB_FIELDS
+below are copied verbatim from abi/v25_05.py.
 
-  - slurmdb_job_rec_t, slurmdb_job_cond_t, slurmdb_assoc_rec_t: byte-for-byte
-    identical to 25.05 (confirmed via diff) -- CDEF/ASSOC_CDEF/JOB_FIELDS
-    below are copied verbatim from abi/v25_05.py.
-  - slurmdb_tres_rec_t gained a `char modifier;` field, inserted between
-    `id` and `name`. Not declared in fastsacct.py's shared cdef for that
-    struct (used only by --full's TRES id/name lookup) -- checked by hand
-    that this doesn't change `name`/`type`'s offsets: `id` (uint32_t) ends
-    at a non-8-aligned offset either way, so the single `char` either gets
-    absorbed into the padding gap before the next 8-byte-aligned pointer
-    field, or -- if omitted -- the compiler inserts that same padding
-    anyway. Both layouts put `name`/`type` at the identical offset, so no
-    cdef change was needed there.
+One real behavioral addition confirmed by diffing data_parser v0.0.44
+(25.11) against v0.0.43 (25.05)'s parsers.c, folded into fastsacct.py's
+shared decode helpers (not here) since it's additive and harmless for
+older releases (the new bit is never set by pre-25.11 libslurmdb.so): `flags`
+(SLURMDB_JOB_FLAGS) gained bit 5, SLURMDB_JOB_FLAG_ALTERED -> "JOB_ALTERED".
+`state` (JOB_STATE) also gained a new flag bit, JOB_EXPEDITING (bit 24) ->
+"EXPEDITING", folded in the same way.
 
-Two real behavioral additions confirmed by diffing data_parser
-v0.0.44 (25.11) against v0.0.43 (25.05)'s parsers.c, both folded into the
-shared full_format.py (not here) since they're additive and harmless for
-older releases (the new bits/reason code are never set by pre-25.11
-libslurmdb.so):
-  - `flags` (SLURMDB_JOB_FLAGS) gained bit 5, SLURMDB_JOB_FLAG_ALTERED ->
-    "JOB_ALTERED".
-  - `state/reason` gained enum slot 17 (previously `DEFUNCT_WAIT_17`, a
-    reserved placeholder with no string in 24.11/25.05) -> now
-    `WAIT_NVIDIA_IMEX_CHANNELS` -> "NvidiaImexChannels". Not a shift: this
-    slot already existed as a placeholder, so every other reason code's
-    numeric value is unchanged.
-  - `state` (JOB_STATE) gained a new flag bit, JOB_EXPEDITING (bit 24) ->
-    "EXPEDITING".
-
-Everything else full-mode rendering depends on (PROCESS_EXIT_CODE,
-WCKEY_TAG, MEM_PER_CPU/NODE, JOB_PLANNED_TIME, TRES_STR dump + its INT64
-count quirk, JOB_ASSOC_ID's no-RPC synthesis, %N stdio expansion via
-job->nodes) was diffed function-by-function against 25.05 and found
-identical.
+Everything else flat-mode decoding depends on (PROCESS_EXIT_CODE, TRES_STR
+dump + its INT64 count quirk) was diffed function-by-function against 25.05
+and found identical.
 """
-
-import full_format
 
 SLURM_ABI_VERSION = "25.11"
 
@@ -198,36 +175,7 @@ typedef struct {
 } slurmdb_job_rec_t;
 """
 
-# --- JOB_ASSOC_ID ("association", --full only) ---
-# Same as 25.05 (see abi/v25_05.py's comment): DUMP_FUNC(JOB_ASSOC_ID) is
-# unchanged between data_parser v0.0.43 and v0.0.44 -- still synthesizes a
-# mostly-empty association object with no RPC, only cluster/id filled in.
-ASSOC_CDEF = ""
-
-
-def fetch_assoc_list(ffi, lib, conn):
-    return None  # unused on 25.11 -- see ASSOC_CDEF comment
-
-
-def job_assoc(job, ffi, assoc_list):
-    return {
-        "account": "",
-        "cluster": ffi.string(job.cluster).decode() if job.cluster != ffi.NULL else "",
-        "partition": "",
-        "user": "",
-        "id": int(job.associd),
-    }
-
-
-# --- %N in stdin/stdout/stderr expansion (--full only) ---
-# slurmdb_expand_job_stdio_fields() still takes %N from the first node of
-# job->nodes on 25.11 -- confirmed by diffing its body against 25.05
-# (internal step_id representation changed, but not this behavior).
-def stdio_node(job, ffi):
-    nodes = ffi.string(job.nodes).decode() if job.nodes != ffi.NULL else ""
-    return full_format.hostlist_first(nodes)
-
-
+# (json_key, c_field, kind) -- see abi/v25_05.py for the "kind" contract.
 JOB_FIELDS = [
     ("account", "account", "str"),
     ("admin_comment", "admin_comment", "str"),
