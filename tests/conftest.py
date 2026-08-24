@@ -119,9 +119,11 @@ def run_fastsacct(library, abi=None, extra_args=()):
 # ---------------------------------------------------------------------------
 MOCK_NOW_ARGS = ("2026-01-01", "2026-01-02")
 MOCK_JOBS = [
-    {"jobid": 1001, "account": "mila-account", "jobname": "train_job", "delta": (3600, 1800)},
-    {"jobid": 1002, "account": "mila-account", "jobname": "eval_job", "delta": (1800, 900)},
-    {"jobid": 1003, "account": "other-account", "jobname": "sweep_job", "delta": (7200, 6900)},
+    {"jobid": 1001, "account": "mila-account", "jobname": "train_job", "delta": (3600, 1800), "timelimit": 60},
+    {"jobid": 1002, "account": "mila-account", "jobname": "eval_job", "delta": (1800, 900), "timelimit": 60},
+    # No time limit -- exercises the INFINITE-sentinel-to-0 mapping for
+    # "u32_inf0" fields (see fastsacct.py's _job_to_dict).
+    {"jobid": 1003, "account": "other-account", "jobname": "sweep_job", "delta": (7200, 6900), "timelimit": fastsacct.INFINITE},
 ]
 
 
@@ -158,7 +160,7 @@ def _expected_job(job, now, version, module):
         "exitcode": 0,
         "priority": 100,
         "qosid": 1,
-        "timelimit": 60,
+        "timelimit": job["timelimit"],
         "wckeyid": 0,
         "wckey": "*default",
         "tot_cpu_sec": 120,
@@ -189,6 +191,9 @@ def _expected_job(job, now, version, module):
         elif kind == "no_val32":
             ival = val or 0
             out[json_key] = None if ival in (fastsacct.NO_VAL, fastsacct.INFINITE) else ival
+        elif kind == "u32_inf0":
+            ival = val or 0
+            out[json_key] = 0 if ival == fastsacct.INFINITE else ival
         else:
             out[json_key] = val if val is not None else 0
     out["allocated_cpu"] = out["requested_cpu"] = 4

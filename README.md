@@ -79,6 +79,8 @@ every downstream consumer:
   of the flat fields. The CPU-usage counters (`sys_cpu_sec`, `tot_cpu_sec`,
   `user_cpu_sec`, and their `_usec` siblings) are left as-is — they're
   already qualified by `sys_`/`tot_`/`user_`.
+- `time_timelimit` is `0`, not the raw `INFINITE` sentinel
+  (`4294967295`/`0xFFFFFFFF`), for a job with no time limit.
 - `tres_alloc_str`/`tres_req_str` (e.g. `"1=4,2=17179869184,1001=2"`) are
   still emitted raw, but also expanded into `allocated_<type>[_<name>]`/
   `requested_<type>[_<name>]` fields (e.g. `allocated_cpu`, `allocated_mem`,

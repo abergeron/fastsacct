@@ -846,6 +846,12 @@ class Slurmdb:
                 # NO_VAL/INFINITE sentinel collapsed to a plain null.
                 ival = int(val)
                 out[json_key] = None if ival in (NO_VAL, INFINITE) else ival
+            elif kind == "u32_inf0":
+                # INFINITE sentinel collapsed to 0 -- for a u32 field where
+                # INFINITE means "no limit" (e.g. time_timelimit for a job
+                # with no time limit), not "unset"/NO_VAL.
+                ival = int(val)
+                out[json_key] = 0 if ival == INFINITE else ival
             else:
                 out[json_key] = int(val)
         out.update(self._tres_flat_fields("allocated", out.get("tres_alloc_str")))

@@ -185,8 +185,8 @@ typedef struct {
 # Slurmdb._job_to_dict() converts the raw cffi value. "str" fields are
 # NULL-safe; the plain numeric kinds (u32/u64/u16/time) map directly to
 # their C type; the rest ("group", "flags", "job_state", "qos_name",
-# "no_val32") get the cheap, no-RPC-per-job decoding described next to
-# their handling in _job_to_dict.
+# "no_val32", "u32_inf0") get the cheap, no-RPC-per-job decoding described
+# next to their handling in _job_to_dict.
 JOB_FIELDS = [
     ("account", "account", "str"),
     ("admin_comment", "admin_comment", "str"),
@@ -249,7 +249,7 @@ JOB_FIELDS = [
     ("system_comment", "system_comment", "str"),
     ("sys_cpu_sec", "sys_cpu_sec", "u64"),
     ("sys_cpu_usec", "sys_cpu_usec", "u64"),
-    ("time_timelimit", "timelimit", "u32"),
+    ("time_timelimit", "timelimit", "u32_inf0"),
     ("tot_cpu_sec", "tot_cpu_sec", "u64"),
     ("tot_cpu_usec", "tot_cpu_usec", "u64"),
     ("tres_alloc_str", "tres_alloc_str", "str"),

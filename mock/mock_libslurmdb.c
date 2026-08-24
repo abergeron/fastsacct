@@ -183,7 +183,7 @@ static void dump_received_job_cond(slurmdb_job_cond_t *job_cond)
 
 static slurmdb_job_rec_t *make_job(uint32_t jobid, const char *account,
                                     const char *jobname, time_t start,
-                                    time_t end)
+                                    time_t end, uint32_t timelimit)
 {
     slurmdb_job_rec_t *j = calloc(1, sizeof(*j));
     j->jobid = jobid;
@@ -217,7 +217,7 @@ static slurmdb_job_rec_t *make_job(uint32_t jobid, const char *account,
     j->exitcode = 0;
     j->priority = 100;
     j->qosid = 1;
-    j->timelimit = 60;
+    j->timelimit = timelimit;
     j->wckeyid = 0;
     j->wckey = strdup("*default");
     j->tot_cpu_sec = 120;
@@ -255,11 +255,13 @@ list_t *slurmdb_jobs_get(void *db_conn, slurmdb_job_cond_t *job_cond)
     time_t now = job_cond->usage_end ? job_cond->usage_end : 1735689600;
 
     slurm_list_append(result, make_job(1001, "mila-account", "train_job",
-                                        now - 3600, now - 1800));
+                                        now - 3600, now - 1800, 60));
     slurm_list_append(result, make_job(1002, "mila-account", "eval_job",
-                                        now - 1800, now - 900));
+                                        now - 1800, now - 900, 60));
+    /* No time limit -- exercises fastsacct.py's INFINITE(0xFFFFFFFF)->0
+     * mapping for time_timelimit (see tests/conftest.py). */
     slurm_list_append(result, make_job(1003, "other-account", "sweep_job",
-                                        now - 7200, now - 6900));
+                                        now - 7200, now - 6900, INFINITE));
 
     return result;
 }
