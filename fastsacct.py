@@ -327,11 +327,10 @@ class SlurmdbError(RuntimeError):
 # re-decode. Ported from sacct's own `data_parser` plugin
 # (src/plugins/data_parser/v0.0.4{2,3,4}/parsers.c) and validated
 # field-by-field against real `sacct --json` output on a real cluster
-# (mila, Slurm 25.05.2, 2003 real jobs) back when this logic fed a --full
-# mode that has since been removed (flat is now the only output). Every
-# table/algorithm here was confirmed byte-for-byte identical between Slurm
-# 24.11 (data_parser v0.0.42), 25.05 (v0.0.43), and 25.11 (v0.0.44) by
-# direct diff of parsers.c -- that's why this is version-independent
+# (mila, Slurm 25.05.2). Every table/algorithm here was
+# confirmed byte-for-byte identical between Slurm 24.11 (data_parser
+# v0.0.42), 25.05 (v0.0.43), and 25.11 (v0.0.44) by direct diff of
+# parsers.c -- that's why this is version-independent
 # (unlike abi/*.py) -- with two purely additive exceptions folded in
 # directly below (a new SLURMDB_JOB_FLAGS bit and a new JOB_STATE flag
 # bit, both added in 25.11; see the comments next to

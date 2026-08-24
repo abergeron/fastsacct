@@ -23,8 +23,8 @@
  * matching the ids baked into make_job()'s tres_alloc_str/tres_req_str/
  * qosid) so the flat schema's id-resolution path has something real to
  * resolve against. slurmdb_associations_get()/slurmdb_destroy_assoc_rec()
- * are unused stubs, left over from a removed --full mode that fastsacct.py
- * no longer calls -- kept only so this file still builds standalone.
+ * are unused stubs that fastsacct.py never calls -- kept only so this file
+ * still builds standalone.
  */
 #include <slurm/slurm.h>
 #include <slurm/slurmdb.h>
@@ -290,8 +290,9 @@ void slurmdb_destroy_job_cond_members(slurmdb_job_cond_t *job_cond)
     job_cond->acct_list = NULL;
 }
 
-/* --full support: id->name lookups. ids/names below match what make_job()
- * bakes into tres_alloc_str/tres_req_str and qosid above. */
+/* id->name lookups for the flat schema's allocated_/requested_ and qos
+ * fields. ids/names below match what make_job() bakes into
+ * tres_alloc_str/tres_req_str and qosid above. */
 static slurmdb_tres_rec_t *make_tres(uint32_t id, const char *type,
                                       const char *name)
 {
@@ -350,15 +351,10 @@ void slurmdb_destroy_qos_rec(void *object)
     free(q);
 }
 
-/* 24.11-only code path (see abi/v24_11.py) -- deliberately NOT exercised
- * against real struct data here: this mock is compiled against whichever
- * slurmdb.h is checked out locally (25.05), which is NOT the 24.11-shaped
- * slurmdb_assoc_rec_t (extra lft/rgt fields) that abi/v24_11.py's ASSOC_CDEF
- * describes. Returning an empty list keeps the 24.11 code path exercisable
- * (job_assoc() falls through to {} with no match) without touching any
- * struct field that could be at the wrong offset for a real 24.11 build.
- * The 24.11 struct layout itself was verified separately against
- * `origin/slurm-24.11:slurm/slurmdb.h`, not via this mock. */
+/* Unused stub (see the file header comment) -- returns an empty list so
+ * linking succeeds without touching any slurmdb_assoc_rec_t field, whose
+ * layout differs across the vendored slurm/slurmdb.h headers this file
+ * gets compiled against. */
 list_t *slurmdb_associations_get(void *db_conn, slurmdb_assoc_cond_t *assoc_cond)
 {
     (void) db_conn;
