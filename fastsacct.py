@@ -35,7 +35,7 @@ import sys
 import cffi
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from abi import v24_11, v25_05, v25_11
+from abi import v24_11, v25_05, v25_11, v26_05
 
 SCHEMA_VERSION = "fastsacct-flat-v1"
 
@@ -43,6 +43,7 @@ SCHEMA_VERSION = "fastsacct-flat-v1"
 # Add new releases here as they're built (see abi/v25_05.py's docstring
 # for how to build one).
 ABI_REGISTRY = {
+    v26_05.SLURM_ABI_VERSION: v26_05,
     v25_11.SLURM_ABI_VERSION: v25_11,
     v25_05.SLURM_ABI_VERSION: v25_05,
     v24_11.SLURM_ABI_VERSION: v24_11,
@@ -102,7 +103,7 @@ def _abi_version_via_sacct():
 def detect_abi(library_path):
     try:
         api_major = _api_major_via_libslurmdb(library_path)
-    except Exception as lib_exc:
+    except Exception as lib_exc:  # noqa: BLE001
         try:
             version_str = _abi_version_via_sacct()
         except Exception as sacct_exc:
@@ -546,12 +547,31 @@ class Slurmdb:
              * our allocation smaller than what the real function expects
              * to read/write, corrupting adjacent heap memory. Confirmed
              * against slurm/slurmdb.h (25.05); version-independent for the
-             * fields used here. */
+             * fields used here -- EXCEPT slurmdb_tres_rec_t, which gained a
+             * `char modifier;` field between `id` and `name` in 26.05 (see
+             * abi/v26_05.py's docstring). Checked with offsetof(): here
+             * that 1-byte insertion lands entirely inside the alignment
+             * padding `id` already needed before the 8-byte-aligned `name`
+             * pointer, so name/type's offsets are unaffected either way on
+             * this ABI -- but that's a coincidence of this specific
+             * insertion point, not something to rely on, so the field is
+             * spliced in anyway (per abi/vXX_YY.py's
+             * SLURMDB_TRES_REC_HAS_MODIFIER) to keep this an honest
+             * transcription of the real struct rather than "the fields
+             * that happen to matter today". See ARCHITECTURE.md gotcha
+             * #6. */
             typedef struct {
                 uint64_t alloc_secs;
                 uint32_t rec_count;
                 uint64_t count;
                 uint32_t id;
+            """
+            + (
+                "                char modifier;\n"
+                if abi.SLURMDB_TRES_REC_HAS_MODIFIER
+                else ""
+            )
+            + """
                 char *name;
                 char *type;
             } slurmdb_tres_rec_t;

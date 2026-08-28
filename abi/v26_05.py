@@ -1,52 +1,61 @@
 """
-ABI description for Slurm 25.05.x.
+ABI description for Slurm 26.05.x.
 
-This mirrors the *exact* field order of the structs declared in the
-installed headers `slurm/slurm.h` and `slurm/slurmdb.h` for this Slurm
-release. cffi's ABI mode (dlopen, no compiler) computes struct offsets
-purely from this text using standard C layout rules, so every field
-between the start of the struct and the last one we care about MUST be
-present, in order -- omitting a field silently shifts every later
-offset instead of raising an error.
+See abi/v25_05.py for the general regeneration notes. This file was built by
+diffing `slurmdb_job_rec_t` / `slurmdb_job_cond_t` in
+`origin/slurm-26.05:slurm/slurmdb.h` against the 25.11 branch (25.11 itself
+is byte-for-byte identical to 25.05, see abi/v25_11.py):
 
-Regenerating this file for a new Slurm release:
-  1. diff this struct body against `slurm/slurmdb.h` in the new release
-     branch (`slurmdb_job_rec_t` / `slurmdb_job_cond_t`).
-  2. Across 22.05 -> 26.05 this struct has only ever grown by appending
-     fields at the end (verified by diffing all 7 release branches) --
-     so in practice this is a short copy/paste-and-diff job, not a
-     rewrite. Bump SLURM_ABI_VERSION and add the new fields to CDEF and,
-     if you want them in the output, to JOB_FIELDS.
+  - `slurmdb_job_cond_t` is unchanged.
+  - `slurmdb_job_rec_t` gained three fields, all purely additive (no
+    removals, no reordering of existing fields):
+      - `char *exclusive;` -- inserted between `env` and `exitcode`.
+      - `char *oversubscribe;` -- inserted between `nodes` and `partition`.
+      - `uint64_t sluid;` -- inserted between `show_full` and `start`.
+    CDEF/JOB_FIELDS below are copied from abi/v25_11.py with those three
+    fields spliced in at their real struct positions (offsets of every
+    field after each insertion point shift accordingly, so position
+    matters, not just presence).
+
+One thing this file does NOT declare: `slurmdb_tres_rec_t` (used by
+`Slurmdb.fetch_tres()` for the flat schema's `allocated_*`/`requested_*`
+resolution) also changed in 26.05 -- a `char modifier;` field was inserted
+between `id` and `name`. That struct is version-independent scaffolding
+for a helper RPC, not part of the job ABI this file describes, so it's
+declared directly in `Slurmdb.__init__` (fastsacct.py) instead -- see
+`SLURMDB_TRES_REC_HAS_MODIFIER` below and the comment next to
+`slurmdb_tres_rec_t` there (short version: on this ABI the 1-byte insertion
+happens to land inside padding `id` already needed, so it doesn't actually
+move `name`/`type`'s offsets -- declared anyway, since that's a coincidence
+of this specific insertion point; see ARCHITECTURE.md gotcha #6).
+
+Everything else flat-mode decoding depends on (SLURMDB_JOB_FLAGS, JOB_STATE,
+PROCESS_EXIT_CODE, TRES_STR dump + its INT64 count quirk) was diffed
+function-by-function against 25.11's data_parser (v0.0.44 -> v0.0.45
+parsers.c) and found identical -- no new flag/state bits.
 """
 
-SLURM_ABI_VERSION = "25.05"
+SLURM_ABI_VERSION = "26.05"
 
-# Value returned by the public `slurm_api_version()` (slurm/slurm.h) for
-# this release, i.e. API_CURRENT from META (API_AGE is 0 for this release,
-# so API_MAJOR == API_CURRENT -- see auxdir/slurm.m4). Confirmed via
-# `git show origin/slurm-25.05:META`. Used to auto-detect which of these
-# abi/ modules matches a given libslurmdb.so at runtime.
-SLURM_API_MAJOR = 43
+# See abi/v25_05.py for what this is. Confirmed via
+# `git show origin/slurm-26.05:META` (API_CURRENT=45, API_AGE=0).
+SLURM_API_MAJOR = 45
 
-# JOBCOND_FLAG_* / SLURM_BIT(n) values, from slurm/slurmdb.h.
-# SLURM_BIT(offset) == (uint64_t)1 << offset -- confirmed in slurm/slurm.h.
+# Unchanged vs. 25.05/25.11; SLURM_BIT(offset) == (uint64_t)1 << offset.
 JOBCOND_FLAG_DUP = 1 << 0
 JOBCOND_FLAG_NO_STEP = 1 << 1
 JOBCOND_FLAG_NO_TRUNC = 1 << 2
 
-# job_cond->db_flags sentinel (distinct field from job_cond->flags above).
-# The accounting_storage/mysql query builder treats db_flags as "filter on
-# these bits" UNLESS it's exactly NOTSET -- 0 is NOT a wildcard here, it's
-# SLURMDB_JOB_FLAG_NONE, which builds `t1.flags = 0` and matches almost no
-# real job (e.g. as_mysql_job.c sets SLURMDB_JOB_FLAG_START_R the moment a
-# job's start RPC lands). sacct always sets db_flags = NOTSET in
-# _init_params() (src/sacct/options.c) for exactly this reason.
+# See v25_05.py's comment -- job_cond->db_flags must be set to NOTSET, not
+# left at 0, or the query silently filters to `t1.flags = 0` server-side.
 JOBCOND_DB_FLAG_NOTSET = 1 << 0
 
-# `slurmdb_tres_rec_t` (slurm/slurmdb.h) has no `modifier` field here (added
-# in 26.05, see abi/v26_05.py). Read by Slurmdb.__init__ (fastsacct.py) to
-# build that struct's cdef.
-SLURMDB_TRES_REC_HAS_MODIFIER = False
+# `slurmdb_tres_rec_t` (slurm/slurmdb.h) gained `char modifier;` between
+# `id` and `name` in 26.05 -- see the module docstring. Read by
+# Slurmdb.__init__ (fastsacct.py) to decide whether to splice that field
+# into its own (otherwise version-independent) slurmdb_tres_rec_t cdef, so
+# `t.name`/`t.type` are read from the right offsets.
+SLURMDB_TRES_REC_HAS_MODIFIER = True
 
 CDEF = r"""
 /* time_t is `long` on LP64 Linux (our deployment target); cffi has no
@@ -72,7 +81,8 @@ void slurm_list_destroy(list_t *l);
 
 char *slurm_strerror(int errnum);
 
-/* mirrors slurmdb_job_cond_t, slurm/slurmdb.h (25.05) -- INPUT struct */
+/* mirrors slurmdb_job_cond_t, slurm/slurmdb.h (26.05) -- INPUT struct,
+ * identical to 25.05/25.11 */
 typedef struct {
     list_t *acct_list;
     list_t *associd_list;
@@ -108,7 +118,9 @@ list_t *slurmdb_jobs_get(void *db_conn, slurmdb_job_cond_t *job_cond);
 void slurmdb_destroy_job_rec(void *object);
 void slurmdb_destroy_job_cond_members(slurmdb_job_cond_t *job_cond);
 
-/* mirrors slurmdb_job_rec_t, slurm/slurmdb.h (25.05) -- OUTPUT struct */
+/* mirrors slurmdb_job_rec_t, slurm/slurmdb.h (26.05) -- OUTPUT struct.
+ * See module docstring for the 3 fields added vs. 25.05/25.11
+ * (exclusive, oversubscribe, sluid). */
 typedef struct {
     char *account;
     char *admin_comment;
@@ -129,6 +141,7 @@ typedef struct {
     time_t eligible;
     time_t end;
     char *env;
+    char *exclusive;
     uint32_t exitcode;
     char *extra;
     char *failed_node;
@@ -143,6 +156,7 @@ typedef struct {
     char *licenses;
     char *mcs_label;
     char *nodes;
+    char *oversubscribe;
     char *partition;
     uint32_t priority;
     uint32_t qosid;
@@ -157,6 +171,7 @@ typedef struct {
     char *script;
     uint16_t segment_size;
     uint32_t show_full;
+    uint64_t sluid;
     time_t start;
     uint32_t state;
     uint32_t state_reason_prev;
@@ -186,12 +201,9 @@ typedef struct {
 } slurmdb_job_rec_t;
 """
 
-# (json_key, c_field, kind) -- kind drives how fastsacct.py's
-# Slurmdb._job_to_dict() converts the raw cffi value. "str" fields are
-# NULL-safe; the plain numeric kinds (u32/u64/u16/time) map directly to
-# their C type; the rest ("group", "flags", "job_state", "qos_name",
-# "no_val32", "u32_inf0") get the cheap, no-RPC-per-job decoding described
-# next to their handling in _job_to_dict.
+# (json_key, c_field, kind) -- see abi/v25_05.py for the "kind" contract.
+# Note: has 3 extra entries vs. 25.05/25.11 (exclusive, oversubscribe,
+# sluid) that don't exist in those releases -- see module docstring.
 JOB_FIELDS = [
     ("account", "account", "str"),
     ("admin_comment", "admin_comment", "str"),
@@ -215,6 +227,7 @@ JOB_FIELDS = [
     ("time_elapsed", "elapsed", "u32"),
     ("time_eligible", "eligible", "time"),
     ("time_end", "end", "time"),
+    ("exclusive", "exclusive", "str"),
     ("exitcode", "exitcode", "u32"),
     ("extra", "extra", "str"),
     ("failed_node", "failed_node", "str"),
@@ -229,6 +242,7 @@ JOB_FIELDS = [
     ("licenses", "licenses", "str"),
     ("mcs_label", "mcs_label", "str"),
     ("nodes", "nodes", "str"),
+    ("oversubscribe", "oversubscribe", "str"),
     ("partition", "partition", "str"),
     ("priority", "priority", "u32"),
     ("qos", "qosid", "qos_name"),
@@ -242,6 +256,7 @@ JOB_FIELDS = [
     ("resv_req", "resv_req", "str"),
     ("segment_size", "segment_size", "u16"),
     ("show_full", "show_full", "u32"),
+    ("sluid", "sluid", "u64"),
     ("time_start", "start", "time"),
     ("state", "state", "job_state"),
     ("state_reason_prev", "state_reason_prev", "u32"),

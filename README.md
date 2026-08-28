@@ -43,7 +43,7 @@ Useful flags for diagnosis, in rough order of how often you'll want them:
   after `slurm_init()`. Always reach for this first when output looks
   wrong — it tells you whether the problem is upstream of fastsacct
   (connection/query) or in fastsacct's own formatting.
-- `--abi {24.11,25.05,25.11}` — override auto-detection (see `detect_abi()`).
+- `--abi {24.11,25.05,25.11,26.05}` — override auto-detection (see `detect_abi()`).
 - `--library` — path to `libslurm.so`/`libslurmdb.so`. Defaults to
   `libslurmdb.so` resolved via the normal linker search path, but most
   clusters only ship `libslurm.so` (see the RTLD_GLOBAL gotcha below) —
@@ -115,18 +115,19 @@ by `configure` and isn't present in a bare checkout), points
 `fastsacct.py` at the resulting `.so`, and checks the flat JSON output
 field-by-field against what `mock_libslurmdb.c`'s `make_job()` actually
 wrote — including the fields that only exist on some releases (`lft` on
-24.11 only; `resv_req`/`segment_size` on 25.05+ only, see
-`abi/v24_11.py`'s docstring). Requires a C compiler (`cc`/`clang`/`gcc`) on
+24.11 only; `resv_req`/`segment_size` on 25.05+ only; `exclusive`/
+`oversubscribe`/`sluid` on 26.05+ only, see `abi/v24_11.py`'s and
+`abi/v26_05.py`'s docstrings). Requires a C compiler (`cc`/`clang`/`gcc`) on
 `PATH`; the whole suite is skipped if none is found.
 
 Using a _different_ release's headers per version (rather than one
 struct reused everywhere) matters here: `slurmdb_job_rec_t` is not
-actually byte-for-byte identical across 24.11/25.05/25.11 — 24.11 has an
-extra field and is missing two that 25.05+ added (see
-`abi/v24_11.py`'s docstring) — so building 24.11's mock against a
-25.05-shaped struct would silently validate the wrong offsets. Building
-each mock against its own release's real header is what makes a passing
-test mean anything.
+actually byte-for-byte identical across 24.11/25.05/25.11/26.05 — 24.11 has
+an extra field and is missing two that 25.05+ added, and 26.05 adds three
+more on top of that (see `abi/v24_11.py`'s and `abi/v26_05.py`'s
+docstrings) — so building 24.11's mock against a 25.05-shaped struct would
+silently validate the wrong offsets. Building each mock against its own
+release's real header is what makes a passing test mean anything.
 
 The mock exercises both directions of the ABI: fastsacct writes a
 `job_cond` → mock prints what it received (confirms Python wrote at the
@@ -152,8 +153,9 @@ TZ=UTC uv run python fastsacct.py -S 2026-01-01 -E 2026-01-02 -D -X -a \
 ```
 
 Swap `-Imock/include/25.05 -DMOCK_API_MAJOR=43` for
-`-Imock/include/24.11 -DMOCK_API_MAJOR=42` or
-`-Imock/include/25.11 -DMOCK_API_MAJOR=44` to target the other two ABIs —
+`-Imock/include/24.11 -DMOCK_API_MAJOR=42`,
+`-Imock/include/25.11 -DMOCK_API_MAJOR=44`, or
+`-Imock/include/26.05 -DMOCK_API_MAJOR=45` to target the other ABIs —
 `MOCK_API_MAJOR` must match the header set (it picks the mock's
 `slurm_api_version()` return value _and_, via `#if MOCK_API_MAJOR == 42`
 in `mock_libslurmdb.c`, which of the version-specific job fields to set).

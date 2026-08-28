@@ -1,6 +1,6 @@
 /*
  * Mock libslurmdb for local testing of fastsacct.py without a real Slurm
- * install. This single source file is compiled three times, once per
+ * install. This single source file is compiled once per
  * mock/include/<version>/slurm/{slurm.h,slurmdb.h} vendored from that
  * release's real headers (see tests/conftest.py) -- each build shares the
  * exact same struct layout fastsacct.py's cffi cdef for that release is
@@ -233,10 +233,18 @@ static slurmdb_job_rec_t *make_job(uint32_t jobid, const char *account,
 #else
     /* 25.05+-only fields, didn't exist in 24.11 -- see abi/v24_11.py's
      * docstring. Only compile/exist in this branch because
-     * mock/include/{25.05,25.11}/slurm/slurmdb.h are the real 25.05/25.11
-     * headers, which declare them. */
+     * mock/include/{25.05,25.11,26.05}/slurm/slurmdb.h are the real
+     * 25.05/25.11/26.05 headers, which declare them. */
     j->resv_req = strdup("normal");
     j->segment_size = 8;
+#endif
+#if MOCK_API_MAJOR >= 45
+    /* 26.05+-only fields -- see abi/v26_05.py's docstring. Only
+     * compile/exist in this branch because mock/include/26.05/slurm/
+     * slurmdb.h is the real 26.05 header, which declares them. */
+    j->exclusive = strdup("NO");
+    j->oversubscribe = strdup("NO");
+    j->sluid = 0x123456789ULL;
 #endif
     /* Last field in the struct in every release -- set explicitly so a
      * wrong field offset anywhere upstream of it (e.g. from building

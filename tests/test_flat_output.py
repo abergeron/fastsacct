@@ -1,21 +1,38 @@
 """
-End-to-end tests: for each supported ABI (24.11, 25.05, 25.11), build a
-mock libslurmdb.so against that release's real vendored headers
+End-to-end tests: for each supported ABI (24.11, 25.05, 25.11, 26.05), build
+a mock libslurmdb.so against that release's real vendored headers
 (mock/include/<version>/), point fastsacct.py at it, and check the flat
 JSON output is exactly right -- including the handful of fields that only
-exist on some releases (lft on 24.11; resv_req/segment_size on 25.05+).
+exist on some releases (lft on 24.11; resv_req/segment_size on 25.05+;
+exclusive/oversubscribe/sluid on 26.05+).
 
 Run with: uv run pytest
 """
 
-import fastsacct
 import pytest
 from conftest import ABI_VERSIONS, expected_jobs, run_fastsacct
 
+import fastsacct
+
+VERSION_26_05_ONLY = {"exclusive", "oversubscribe", "sluid"}
+
 VERSION_ONLY_FIELDS = {
-    "24.11": {"present": {"lft"}, "absent": {"resv_req", "segment_size"}},
-    "25.05": {"present": {"resv_req", "segment_size"}, "absent": {"lft"}},
-    "25.11": {"present": {"resv_req", "segment_size"}, "absent": {"lft"}},
+    "24.11": {
+        "present": {"lft"},
+        "absent": {"resv_req", "segment_size"} | VERSION_26_05_ONLY,
+    },
+    "25.05": {
+        "present": {"resv_req", "segment_size"},
+        "absent": {"lft"} | VERSION_26_05_ONLY,
+    },
+    "25.11": {
+        "present": {"resv_req", "segment_size"},
+        "absent": {"lft"} | VERSION_26_05_ONLY,
+    },
+    "26.05": {
+        "present": {"resv_req", "segment_size"} | VERSION_26_05_ONLY,
+        "absent": {"lft"},
+    },
 }
 
 

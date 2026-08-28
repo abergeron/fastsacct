@@ -13,8 +13,9 @@ fastsacct.py       CLI, argument parsing, cffi/RPC plumbing, Slurmdb class,
                    group_name, parse_tres, process_exit_code) — these
                    helpers are version-independent (unlike abi/*.py); see
                    ARCHITECTURE.md for how that's confirmed
-abi/v25_11.py      Slurm 25.11 ABI: struct layouts (CDEF), JOBCOND_FLAG_*
+abi/v26_05.py      Slurm 26.05 ABI: struct layouts (CDEF), JOBCOND_FLAG_*
                    values, flat-mode JOB_FIELDS
+abi/v25_11.py      Same, for Slurm 25.11
 abi/v25_05.py      Same, for Slurm 25.05
 abi/v24_11.py      Same, for Slurm 24.11
 mock/              A fake libslurmdb.so, compiled once per supported ABI
@@ -45,12 +46,13 @@ helpers.
 `qos_name`, `group_name`, `parse_tres`, `process_exit_code`) live outside
 `abi/*.py`, unlike everything else that varies per Slurm release, because
 they were confirmed byte-for-byte identical between Slurm 24.11
-(data_parser v0.0.42), 25.05 (v0.0.43), and 25.11 (v0.0.44) by direct diff
-of `src/plugins/data_parser/v0.0.4{2,3,4}/parsers.c` across all three
-releases. Two purely additive exceptions are folded in directly rather
-than kept per-ABI: a new `SLURMDB_JOB_FLAGS` bit and a new `JOB_STATE`
-flag bit, both added in 25.11 and harmless no-ops on older releases (see
-the comments next to `_JOB_STATE_FLAG_BITS`).
+(data_parser v0.0.42), 25.05 (v0.0.43), 25.11 (v0.0.44), and 26.05
+(v0.0.45) by direct diff of `src/plugins/data_parser/v0.0.4{2,3,4,5}/
+parsers.c` across all four releases. Two purely additive exceptions are
+folded in directly rather than kept per-ABI: a new `SLURMDB_JOB_FLAGS`
+bit and a new `JOB_STATE` flag bit, both added in 25.11 and harmless
+no-ops on older releases (see the comments next to
+`_JOB_STATE_FLAG_BITS`).
 
 ## Decode-helper validation
 
@@ -110,3 +112,29 @@ slurm_protocol_defs.c`) — the mysql filter is a case-sensitive
    (`src/sacct/print.c` `PRINT_COMMENT`). Flat mode's `JOB_FIELDS` uses
    `("comment", "derived_es", "str")` — json key ≠ C field name, on
    purpose, so it's discoverable.
+
+6. **Not every version-dependent struct lives in `abi/*.py`.**
+   `slurmdb_tres_rec_t` (used by `Slurmdb.fetch_tres()`, unrelated to
+   `slurmdb_job_rec_t`/`slurmdb_job_cond_t`) was declared directly in
+   `Slurmdb.__init__` and assumed version-independent — true through
+   24.11/25.05/25.11, until 26.05 inserted a `char modifier;` field between
+   `id` and `name`. Checked with `offsetof()` on the real struct (see
+   `/tmp/offcheck.c`-style probe, System V AMD64 ABI): here that 1-byte
+   insertion happens to land entirely inside the alignment padding
+   `uint32_t id` already needed before the 8-byte-aligned `char *name`
+   pointer, so `name`/`type`'s offsets come out identical with or without
+   `modifier` declared — this particular omission would *not* actually
+   have corrupted TRES resolution. That's a coincidence of this specific
+   insertion point, not something to rely on: a struct's cdef should
+   describe its host, not "the fields I've personally verified matter",
+   so the field is declared anyway, gated on a new
+   `SLURMDB_TRES_REC_HAS_MODIFIER` flag in each `abi/vXX_YY.py` (see the
+   comment next to `slurmdb_tres_rec_t` in `Slurmdb.__init__`) so it's
+   still correct if a future release adds a field that *isn't* padding-
+   absorbed. Moral: when regenerating for a future release, diff the
+   *whole* `slurm/slurmdb.h`, not just `slurmdb_job_rec_t`/
+   `slurmdb_job_cond_t` — anything else fastsacct.py declares its own cdef
+   for (currently `slurmdb_tres_rec_t`/`slurmdb_tres_cond_t`/
+   `slurmdb_qos_rec_t`/`slurmdb_qos_cond_t`/the `slurm_conf_t` prefix) is
+   fair game to have changed too, and don't assume a padding coincidence
+   will save you next time.

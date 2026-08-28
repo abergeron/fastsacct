@@ -35,6 +35,11 @@ JOBCOND_FLAG_NO_TRUNC = 1 << 2
 # left at 0, or the query silently filters to `t1.flags = 0` server-side.
 JOBCOND_DB_FLAG_NOTSET = 1 << 0
 
+# `slurmdb_tres_rec_t` (slurm/slurmdb.h) is unchanged vs. 25.05 here -- no
+# `modifier` field (that's added in 26.05, see abi/v26_05.py). Read by
+# Slurmdb.__init__ (fastsacct.py) to build that struct's cdef.
+SLURMDB_TRES_REC_HAS_MODIFIER = False
+
 CDEF = r"""
 /* time_t is `long` on LP64 Linux (our deployment target); cffi has no
  * built-in knowledge of it since it's platform-defined in <time.h>. */

@@ -20,7 +20,7 @@ FASTSACCT_PY = REPO_ROOT / "fastsacct.py"
 
 sys.path.insert(0, str(REPO_ROOT))
 import fastsacct  # noqa: E402
-from abi import v24_11, v25_05, v25_11  # noqa: E402
+from abi import v24_11, v25_05, v25_11, v26_05  # noqa: E402
 
 # version string -> (abi module, MOCK_API_MAJOR to pass to clang). Must
 # match abi/vXX_YY.py's SLURM_API_MAJOR so slurm_api_version()-based
@@ -29,6 +29,7 @@ ABI_MODULES = {
     v24_11.SLURM_ABI_VERSION: v24_11,
     v25_05.SLURM_ABI_VERSION: v25_05,
     v25_11.SLURM_ABI_VERSION: v25_11,
+    v26_05.SLURM_ABI_VERSION: v26_05,
 }
 ABI_VERSIONS = sorted(ABI_MODULES)
 
@@ -174,6 +175,10 @@ def _expected_job(job, now, version, module):
     else:
         raw["resv_req"] = "normal"
         raw["segment_size"] = 8
+    if version == "26.05":
+        raw["exclusive"] = "NO"
+        raw["oversubscribe"] = "NO"
+        raw["sluid"] = 0x123456789
 
     out = {}
     for json_key, c_field, kind in module.JOB_FIELDS:
