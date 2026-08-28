@@ -80,10 +80,12 @@ def mock_libs(cc, tmp_path_factory):
     return libs
 
 
-def run_fastsacct(library, abi=None, extra_args=()):
+def run_fastsacct(library, abi=None, extra_args=(), raw=False):
     """Run fastsacct.py against `library`, with the required -S/-E/-D/-X/
     -a/--json flags, under TZ=UTC (fastsacct.require_utc_timezone() refuses
-    to run otherwise). Returns the parsed JSON stdout."""
+    to run otherwise). Returns the parsed JSON stdout, or the raw stdout
+    text if raw=True (e.g. for --jsonl, which isn't a single JSON document
+    and so isn't json.loads()-able as a whole)."""
     args = [
         sys.executable,
         str(FASTSACCT_PY),
@@ -107,7 +109,7 @@ def run_fastsacct(library, abi=None, extra_args=()):
         f"fastsacct.py exited {result.returncode}\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
-    return json.loads(result.stdout)
+    return result.stdout if raw else json.loads(result.stdout)
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +127,17 @@ MOCK_JOBS = [
     # No time limit -- exercises the INFINITE-sentinel-to-0 mapping for
     # "u32_inf0" fields (see fastsacct.py's _job_to_dict).
     {"jobid": 1003, "account": "other-account", "jobname": "sweep_job", "delta": (7200, 6900), "timelimit": fastsacct.INFINITE},
+    # Deliberately nasty job name (tab, newline, CR, braces, brackets,
+    # quotes, backslash) -- exercises the --jsonl one-JSON-value-per-line
+    # framing guarantee (see test_flat_output.py's jsonl test). Must match
+    # mock_libslurmdb.c's slurmdb_jobs_get() exactly.
+    {
+        "jobid": 1004,
+        "account": "mila-account",
+        "jobname": "weird\tname\nwith\r{braces}[brackets]\"quotes\"\\backslash",
+        "delta": (100, 50),
+        "timelimit": 60,
+    },
 ]
 
 

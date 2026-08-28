@@ -48,6 +48,8 @@ Useful flags for diagnosis, in rough order of how often you'll want them:
   `libslurmdb.so` resolved via the normal linker search path, but most
   clusters only ship `libslurm.so` (see the RTLD_GLOBAL gotcha below) —
   pass the real path explicitly if in doubt.
+- `--jsonl` — stream newline-delimited JSON instead of one JSON blob; see
+  "Streaming output" below.
 
 ## Output schema
 
@@ -99,6 +101,44 @@ every downstream consumer:
 
 Good enough if your downstream consumer is your own code and you're fine
 post-processing the remaining raw fields yourself.
+
+## Streaming output (`--jsonl`)
+
+By default fastsacct writes one `{"meta": {...}, "jobs": [...]}` JSON blob,
+built entirely in memory and written out with a single `json.dump()` once
+every job has been fetched and decoded. Pass `--jsonl` to instead stream
+newline-delimited JSON: a `{"meta": {...}}` line first, then one job object
+per line — each line written and flushed as soon as that job is decoded,
+so a downstream reader can start processing jobs without waiting for the
+whole run to finish, and without ever holding the full response in memory.
+
+```bash
+uv run python fastsacct.py -A <accounts> -S <start> -E <end> -D -X -a \
+    --json --jsonl --library /path/to/libslurm.so \
+| python3 -c '
+import json, sys
+meta = json.loads(next(sys.stdin))["meta"]
+for line in sys.stdin:
+    job = json.loads(line)
+    ...  # process one job at a time
+'
+```
+
+Job names on a real cluster can contain almost anything short of a NUL
+byte — newlines, tabs, `{`/`}`/`[`/`]`, you name it. That's safe here
+without any extra escaping on fastsacct's part: `json.dumps` (used for
+every line, meta and job alike) already escapes every character JSON
+requires escaped — quotes, backslashes, and every control character below
+`0x20` (`\n`, `\t`, `\r`, and the rest as `\n`/`\t`/`\r`-style shorthand
+where one exists, `\u00XX` otherwise) — so no job's JSON text can ever
+contain a literal newline, and each line is a complete, independently
+parseable JSON value. A plain `for line in sys.stdin: json.loads(line)`
+loop (as above) is all a Python reader needs; no special JSON-streaming
+library required on either end.
+
+Each line has no trailing content and no embedded raw newline, so `wc -l`
+on the output equals the number of jobs plus one (the meta line) —
+useful for a quick sanity check that nothing got mangled in between.
 
 ## Testing locally (no cluster needed)
 

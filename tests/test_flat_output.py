@@ -9,6 +9,8 @@ exclusive/oversubscribe/sluid on 26.05+).
 Run with: uv run pytest
 """
 
+import json
+
 import pytest
 from conftest import ABI_VERSIONS, expected_jobs, run_fastsacct
 
@@ -36,14 +38,7 @@ VERSION_ONLY_FIELDS = {
 }
 
 
-@pytest.mark.parametrize("version", ABI_VERSIONS)
-def test_flat_output(mock_libs, version):
-    output = run_fastsacct(mock_libs[version], abi=version)
-
-    assert output["meta"]["schema_version"] == fastsacct.SCHEMA_VERSION
-    assert output["meta"]["slurm_abi_version"] == version
-
-    jobs = output["jobs"]
+def assert_jobs_match_expected(jobs, version):
     expected = expected_jobs(version)
     assert len(jobs) == len(expected)
 
@@ -58,9 +53,58 @@ def test_flat_output(mock_libs, version):
 
 
 @pytest.mark.parametrize("version", ABI_VERSIONS)
+def test_flat_output(mock_libs, version):
+    output = run_fastsacct(mock_libs[version], abi=version)
+
+    assert output["meta"]["schema_version"] == fastsacct.SCHEMA_VERSION
+    assert output["meta"]["slurm_abi_version"] == version
+
+    assert_jobs_match_expected(output["jobs"], version)
+
+
+@pytest.mark.parametrize("version", ABI_VERSIONS)
 def test_autodetect_via_slurm_api_version(mock_libs, version):
     """No --abi: fastsacct must probe the mock .so's slurm_api_version()
     and land on the same abi/vXX_YY.py module as when told explicitly."""
     detected = run_fastsacct(mock_libs[version])
     explicit = run_fastsacct(mock_libs[version], abi=version)
     assert detected == explicit
+
+
+@pytest.mark.parametrize("version", ABI_VERSIONS)
+def test_jsonl_output(mock_libs, version):
+    """--jsonl must produce the same data as the default single-blob mode,
+    just reshaped into one JSON value per line (meta first, then one job
+    per line) -- including MOCK_JOBS' deliberately nasty job name (tab,
+    newline, CR, braces, brackets, quotes, backslash), which must round-
+    trip byte-for-byte without corrupting the line-per-value framing."""
+    raw = run_fastsacct(
+        mock_libs[version], abi=version, extra_args=["--jsonl"], raw=True
+    )
+
+    # No trailing garbage, no blank lines in the middle -- exactly one
+    # non-empty line per meta/job value, each independently json.loads()-able
+    # regardless of what a job name contains (that's the whole point).
+    assert raw.endswith("\n")
+    lines = raw[:-1].split("\n")
+    assert all(line for line in lines)
+
+    meta_line, *job_lines = lines
+    meta = json.loads(meta_line)["meta"]
+    assert meta["schema_version"] == fastsacct.SCHEMA_VERSION
+    assert meta["slurm_abi_version"] == version
+
+    jobs = [json.loads(line) for line in job_lines]
+    assert_jobs_match_expected(jobs, version)
+
+    # Cross-check against the default mode's meta and jobs, to make sure
+    # --jsonl isn't just internally self-consistent but actually carries
+    # the same data as the non-streaming path.
+    blob = run_fastsacct(mock_libs[version], abi=version)
+    assert meta == blob["meta"]
+    jsonl_names = [json.loads(line)["name"] for line in job_lines]
+    blob_names = [job["name"] for job in blob["jobs"]]
+    assert jsonl_names == blob_names
+    assert (
+        "\t" in jsonl_names[-1] and "\n" in jsonl_names[-1] and "\r" in jsonl_names[-1]
+    )

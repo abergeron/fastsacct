@@ -21,6 +21,18 @@ scalars (not sacct --json's nested {"set":...,"infinite":...,"number":...}
 OpenAPI shape) with a handful of fields decoded to strings/lists or
 expanded into sibling fields where that's cheap to do without an RPC per
 job -- see README.md's "Output schema" section for the full list.
+
+Two output modes, chosen at the CLI (see --jsonl): the default is one
+{"meta": ..., "jobs": [...]} JSON blob written in a single json.dump() once
+every job is decoded; --jsonl instead streams newline-delimited JSON --
+a {"meta": ...} line, then one job object per line, each written and
+flushed as soon as it's decoded. slurmdb_jobs_get() is a single RPC that
+returns every job in one shot, so there's no way to start emitting before
+the whole result set exists in memory either way -- --jsonl's win is
+letting a downstream reader start *processing* jobs (one json.loads() per
+line) without waiting for the whole run to finish or holding the whole
+response in memory, which a single top-level JSON array can't offer
+without both ends speaking an incremental parser.
 """
 
 import argparse
@@ -268,6 +280,20 @@ def build_argparser():
         action="store_true",
         default=False,
         help="required marker flag, must be passed (see module docstring)",
+    )
+    p.add_argument(
+        "--jsonl",
+        action="store_true",
+        default=False,
+        help="stream newline-delimited JSON instead of one JSON blob: "
+        'first line is {"meta": ...}, one job object per line after '
+        "that, each written and flushed as soon as that job is ready "
+        "(see module docstring for why this is preferable to a single "
+        "streamed JSON array). Every line is a single JSON value with "
+        "no embedded literal newlines -- json.dumps's normal escaping "
+        "handles job names containing tabs, newlines, braces, or "
+        "anything else short of a NUL byte -- so a plain readline() + "
+        "json.loads() loop on the other end is safe.",
     )
     p.add_argument(
         "--library",
@@ -819,7 +845,18 @@ class Slurmdb:
         if result == self.ffi.NULL:
             raise SlurmdbError(self._strerror())
 
-        jobs = []
+        # slurmdb_jobs_get() itself is a single RPC -- the whole result list
+        # already exists in C memory by the time we get here, so there's no
+        # earlier point at which real streaming from the source could start.
+        # What we *can* stream is the C-list -> Python-dict decode: this
+        # method stays a plain function (so the SlurmdbError above still
+        # raises synchronously, at the call site, like before) and hands
+        # back a generator for the per-record decode/yield step, so a
+        # caller can emit each job as soon as it's decoded instead of
+        # waiting for a full Python list of every job to be built first.
+        return self._iter_jobs(result)
+
+    def _iter_jobs(self, result):
         itr = self.lib.slurm_list_iterator_create(result)
         try:
             while True:
@@ -827,12 +864,10 @@ class Slurmdb:
                 if job_ptr == self.ffi.NULL:
                     break
                 job = self.ffi.cast("slurmdb_job_rec_t *", job_ptr)
-                jobs.append(self._job_to_dict(job))
+                yield self._job_to_dict(job)
         finally:
             self.lib.slurm_list_iterator_destroy(itr)
             self.lib.slurm_list_destroy(result)
-
-        return jobs
 
     def _job_to_dict(self, job):
         out = {}
@@ -936,25 +971,39 @@ def main(argv=None):
         print(f"fastsacct: {exc}", file=sys.stderr)
         return 1
 
+    meta = {
+        "source": "fastsacct",
+        "schema_version": SCHEMA_VERSION,
+        "slurm_abi_version": abi.SLURM_ABI_VERSION,
+    }
+
     db = Slurmdb(args.library, abi, debug=args.debug)
     try:
-        jobs = db.jobs_get(accounts, args.starttime, args.endtime)
-    except SlurmdbError as exc:
-        print(f"fastsacct: {exc}", file=sys.stderr)
-        return 1
+        try:
+            jobs = db.jobs_get(accounts, args.starttime, args.endtime)
+        except SlurmdbError as exc:
+            print(f"fastsacct: {exc}", file=sys.stderr)
+            return 1
+
+        if args.jsonl:
+            # One job per line, flushed as it's decoded -- see --jsonl's
+            # help text for why a downstream reader doing readline() +
+            # json.loads() is safe against whatever ends up in a job name.
+            # json.dumps's default (compact, ensure_ascii=True) encoding
+            # never emits a literal control character inside a string --
+            # every char < 0x20 is \-escaped (\n, \t, \r, ... or \u00XX),
+            # so no job's JSON text can ever contain a literal newline that
+            # would corrupt this format's one-value-per-line framing.
+            print(json.dumps({"meta": meta}))
+            sys.stdout.flush()
+            for job in jobs:
+                print(json.dumps(job))
+                sys.stdout.flush()
+        else:
+            json.dump({"meta": meta, "jobs": list(jobs)}, sys.stdout)
+            sys.stdout.write("\n")
     finally:
         db.close()
-
-    output = {
-        "meta": {
-            "source": "fastsacct",
-            "schema_version": SCHEMA_VERSION,
-            "slurm_abi_version": abi.SLURM_ABI_VERSION,
-        },
-        "jobs": jobs,
-    }
-    json.dump(output, sys.stdout)
-    sys.stdout.write("\n")
     return 0
 
 

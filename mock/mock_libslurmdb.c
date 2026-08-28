@@ -270,6 +270,14 @@ list_t *slurmdb_jobs_get(void *db_conn, slurmdb_job_cond_t *job_cond)
      * mapping for time_timelimit (see tests/conftest.py). */
     slurm_list_append(result, make_job(1003, "other-account", "sweep_job",
                                         now - 7200, now - 6900, INFINITE));
+    /* Deliberately nasty job name -- tab, newline, CR, braces, brackets,
+     * quotes, backslash -- exercises fastsacct.py's --jsonl framing
+     * guarantee (json.dumps escapes every one of these, so a job name
+     * like this can never break the one-JSON-value-per-line format; see
+     * tests/conftest.py and the "weird chars" case in test_flat_output.py). */
+    slurm_list_append(result, make_job(1004, "mila-account",
+                                        "weird\tname\nwith\r{braces}[brackets]\"quotes\"\\backslash",
+                                        now - 100, now - 50, 60));
 
     return result;
 }
