@@ -26,7 +26,12 @@ Two output modes, chosen at the CLI (see --jsonl): the default is one
 {"meta": ..., "jobs": [...]} JSON blob written in a single json.dump() once
 every job is decoded; --jsonl instead streams newline-delimited JSON --
 a {"meta": ...} line, then one job object per line, each written and
-flushed as soon as it's decoded. slurmdb_jobs_get() is a single RPC that
+flushed as soon as it's decoded. Both modes put a "job_count" in the
+meta: slurm_list_count() is O(1) over the C list_t slurmdb_jobs_get()
+returns, so the total is known the instant the RPC returns, with no job
+decoded into Python memory -- a downstream reader can detect a
+truncated/lost-tail file just from the header, without a trailing count
+chunk and without holding the whole result set in memory. slurmdb_jobs_get() is a single RPC that
 returns every job in one shot, so there's no way to start emitting before
 the whole result set exists in memory either way -- --jsonl's win is
 letting a downstream reader start *processing* jobs (one json.loads() per
@@ -290,11 +295,13 @@ def build_argparser():
         'first line is {"meta": ...}, one job object per line after '
         "that, each written and flushed as soon as that job is ready "
         "(see module docstring for why this is preferable to a single "
-        "streamed JSON array). Every line is a single JSON value with "
-        "no embedded literal newlines -- json.dumps's normal escaping "
-        "handles job names containing tabs, newlines, braces, or "
-        "anything else short of a NUL byte -- so a plain readline() + "
-        "json.loads() loop on the other end is safe.",
+        "streamed JSON array). The meta line carries job_count (the "
+        "total number of job lines to follow), so a reader can detect a "
+        "truncated/lost-tail file from the header alone. Every line is a "
+        "single JSON value with no embedded literal newlines -- "
+        "json.dumps's normal escaping handles job names containing tabs, "
+        "newlines, braces, or anything else short of a NUL byte -- so a "
+        "plain readline() + json.loads() loop on the other end is safe.",
     )
     p.add_argument(
         "--library",
@@ -847,6 +854,13 @@ class Slurmdb:
         if result == self.ffi.NULL:
             raise SlurmdbError(self._strerror())
 
+        # slurm_list_count() is O(1) over the C list_t (a node counter),
+        # so the job count is known the instant the RPC returns -- no
+        # record needs to be decoded into a Python dict just to count
+        # them. Returned alongside the generator so a caller (the --jsonl
+        # writer in main()) can put it in the header without ever holding
+        # the whole result set in Python memory.
+        job_count = self.lib.slurm_list_count(result)
         # slurmdb_jobs_get() itself is a single RPC -- the whole result list
         # already exists in C memory by the time we get here, so there's no
         # earlier point at which real streaming from the source could start.
@@ -856,7 +870,7 @@ class Slurmdb:
         # back a generator for the per-record decode/yield step, so a
         # caller can emit each job as soon as it's decoded instead of
         # waiting for a full Python list of every job to be built first.
-        return self._iter_jobs(result)
+        return job_count, self._iter_jobs(result)
 
     def _iter_jobs(self, result):
         itr = self.lib.slurm_list_iterator_create(result)
@@ -982,10 +996,12 @@ def main(argv=None):
     db = Slurmdb(args.library, abi, debug=args.debug)
     try:
         try:
-            jobs = db.jobs_get(accounts, args.starttime, args.endtime)
+            job_count, jobs = db.jobs_get(accounts, args.starttime, args.endtime)
         except SlurmdbError as exc:
             print(f"fastsacct: {exc}", file=sys.stderr)
             return 1
+
+        meta["job_count"] = job_count
 
         if args.jsonl:
             # One job per line, flushed as it's decoded -- see --jsonl's
@@ -996,6 +1012,10 @@ def main(argv=None):
             # every char < 0x20 is \-escaped (\n, \t, \r, ... or \u00XX),
             # so no job's JSON text can ever contain a literal newline that
             # would corrupt this format's one-value-per-line framing.
+            # job_count comes from slurm_list_count() (O(1) over the C
+            # list) so the header carries the total up front, letting a
+            # reader detect a truncated/lost-tail file without a trailing
+            # count chunk and without holding all jobs in memory.
             print(json.dumps({"meta": meta}))
             sys.stdout.flush()
             for job in jobs:

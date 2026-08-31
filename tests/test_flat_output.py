@@ -58,6 +58,7 @@ def test_flat_output(mock_libs, version):
 
     assert output["meta"]["schema_version"] == fastsacct.SCHEMA_VERSION
     assert output["meta"]["slurm_abi_version"] == version
+    assert output["meta"]["job_count"] == len(output["jobs"])
 
     assert_jobs_match_expected(output["jobs"], version)
 
@@ -93,6 +94,7 @@ def test_jsonl_output(mock_libs, version):
     meta = json.loads(meta_line)["meta"]
     assert meta["schema_version"] == fastsacct.SCHEMA_VERSION_JSONL
     assert meta["slurm_abi_version"] == version
+    assert meta["job_count"] == len(expected_jobs(version))
 
     jobs = [json.loads(line) for line in job_lines]
     assert_jobs_match_expected(jobs, version)
