@@ -91,7 +91,7 @@ def test_jsonl_output(mock_libs, version):
 
     meta_line, *job_lines = lines
     meta = json.loads(meta_line)["meta"]
-    assert meta["schema_version"] == fastsacct.SCHEMA_VERSION
+    assert meta["schema_version"] == fastsacct.SCHEMA_VERSION_JSONL
     assert meta["slurm_abi_version"] == version
 
     jobs = [json.loads(line) for line in job_lines]
@@ -101,7 +101,9 @@ def test_jsonl_output(mock_libs, version):
     # --jsonl isn't just internally self-consistent but actually carries
     # the same data as the non-streaming path.
     blob = run_fastsacct(mock_libs[version], abi=version)
-    assert meta == blob["meta"]
+    meta_wo_ver = {k: v for k, v in meta.items() if k != "schema_version"}
+    blob_wo_ver = {k: v for k, v in blob["meta"].items() if k != "schema_version"}
+    assert meta_wo_ver == blob_wo_ver
     jsonl_names = [json.loads(line)["name"] for line in job_lines]
     blob_names = [job["name"] for job in blob["jobs"]]
     assert jsonl_names == blob_names

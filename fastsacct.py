@@ -50,6 +50,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from abi import v24_11, v25_05, v25_11, v26_05
 
 SCHEMA_VERSION = "fastsacct-flat-v1"
+SCHEMA_VERSION_JSONL = "fastsacct-jsonl-v1"
 
 # One entry per Slurm release we've built an abi/vXX_YY.py module for.
 # Add new releases here as they're built (see abi/v25_05.py's docstring
@@ -189,7 +190,7 @@ def require_utc_timezone():
     """
     offset = datetime.datetime.now().astimezone().utcoffset()
     if offset != datetime.timedelta(0):
-        total_minutes = int(offset.total_seconds() // 60)
+        total_minutes = int(offset.total_seconds() // 60)  # ty: ignore[unresolved-attribute]
         sign = "+" if total_minutes >= 0 else "-"
         h, m = divmod(abs(total_minutes), 60)
         raise SlurmdbError(
@@ -685,7 +686,8 @@ class Slurmdb:
         # defaults to RTLD_LOCAL, which walls those symbols off and makes the
         # plugin load fail with "undefined symbol: slurm_conf".
         self.lib = self.ffi.dlopen(
-            library_path, self.ffi.RTLD_NOW | self.ffi.RTLD_GLOBAL
+            library_path,
+            self.ffi.RTLD_NOW | self.ffi.RTLD_GLOBAL,  # ty: ignore[unresolved-attribute]
         )
         self.lib.slurm_init(self.ffi.NULL)
         if debug:
@@ -973,7 +975,7 @@ def main(argv=None):
 
     meta = {
         "source": "fastsacct",
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": SCHEMA_VERSION_JSONL if args.jsonl else SCHEMA_VERSION,
         "slurm_abi_version": abi.SLURM_ABI_VERSION,
     }
 
