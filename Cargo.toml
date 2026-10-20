@@ -1,0 +1,14 @@
+[package]
+name = "fastsacct"
+version = "0.1.0"
+edition = "2024"
+description = "A fast, narrow replacement for `sacct -A ... -S ... -E ... -D -X -a --json` that calls slurmdb_jobs_get() directly on libslurmdb.so via dlopen, bypassing Slurm's data_parser plugin"
+license = "MIT"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+libc = "0.2"
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

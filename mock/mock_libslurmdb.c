@@ -1,19 +1,20 @@
 /*
- * Mock libslurmdb for local testing of fastsacct.py without a real Slurm
+ * Mock libslurmdb for local testing of fastsacct without a real Slurm
  * install. This single source file is compiled once per
  * mock/include/<version>/slurm/{slurm.h,slurmdb.h} vendored from that
- * release's real headers (see tests/conftest.py) -- each build shares the
- * exact same struct layout fastsacct.py's cffi cdef for that release is
- * meant to describe. This exercises both directions of the ABI:
+ * release's real headers (see tests/mock_e2e.rs) -- each build shares the
+ * exact same struct layout src/abi/vXX_YY.rs's #[repr(C)] JobRec mirror for
+ * that release is meant to describe. This exercises both directions of the
+ * ABI:
  *
- *   - WRITE:  fastsacct.py fills in slurmdb_job_cond_t -> we print what we
- *             received, to confirm the Python side wrote it at the right
+ *   - WRITE:  fastsacct fills in slurmdb_job_cond_t -> we print what we
+ *             received, to confirm the Rust side wrote it at the right
  *             offsets.
- *   - READ:   we fabricate slurmdb_job_rec_t entries -> fastsacct.py reads
- *             them back, to confirm the Python side reads from the right
+ *   - READ:   we fabricate slurmdb_job_rec_t entries -> fastsacct reads
+ *             them back, to confirm the Rust side reads from the right
  *             offsets.
  *
- * It does NOT prove the vendored struct in abi/vXX_YY.py matches whatever
+ * It does NOT prove the vendored struct mirrors in src/abi/ match whatever
  * real libslurmdb.so is on a given cluster node -- only that the fastsacct
  * harness itself (arg parsing, list walking, JSON emission) is correct,
  * against a struct layout that (thanks to the per-version headers) really
@@ -23,7 +24,7 @@
  * matching the ids baked into make_job()'s tres_alloc_str/tres_req_str/
  * qosid) so the flat schema's id-resolution path has something real to
  * resolve against. slurmdb_associations_get()/slurmdb_destroy_assoc_rec()
- * are unused stubs that fastsacct.py never calls -- kept only so this file
+ * are unused stubs that fastsacct never calls -- kept only so this file
  * still builds standalone.
  */
 #include <slurm/slurm.h>
@@ -204,7 +205,7 @@ static slurmdb_job_rec_t *make_job(uint32_t jobid, const char *account,
     j->req_cpus = 4;
     j->alloc_nodes = 2;
     /* real wire format is always "<tres_id>=<count>,..." (numeric ids,
-     * never names) -- see fastsacct.py's parse_tres() for why. 1=cpu,
+     * never names) -- see fastsacct (Rust)'s parse_tres() for why. 1=cpu,
      * 2=mem (bytes), 4=node, matching the fake slurmdb_tres_get() table
      * below. */
     j->tres_alloc_str = strdup("1=4,2=17179869184,4=2");
@@ -266,15 +267,15 @@ list_t *slurmdb_jobs_get(void *db_conn, slurmdb_job_cond_t *job_cond)
                                         now - 3600, now - 1800, 60));
     slurm_list_append(result, make_job(1002, "mila-account", "eval_job",
                                         now - 1800, now - 900, 60));
-    /* No time limit -- exercises fastsacct.py's INFINITE(0xFFFFFFFF)->0
-     * mapping for time_timelimit (see tests/conftest.py). */
+    /* No time limit -- exercises fastsacct (Rust)'s INFINITE(0xFFFFFFFF)->0
+     * mapping for time_timelimit (see tests/mock_e2e.rs). */
     slurm_list_append(result, make_job(1003, "other-account", "sweep_job",
                                         now - 7200, now - 6900, INFINITE));
     /* Deliberately nasty job name -- tab, newline, CR, braces, brackets,
-     * quotes, backslash -- exercises fastsacct.py's --jsonl framing
+     * quotes, backslash -- exercises fastsacct (Rust)'s --jsonl framing
      * guarantee (json.dumps escapes every one of these, so a job name
      * like this can never break the one-JSON-value-per-line format; see
-     * tests/conftest.py and the "weird chars" case in test_flat_output.py). */
+     * tests/mock_e2e.rs and the "weird chars" case in test_flat_output.py). */
     slurm_list_append(result, make_job(1004, "mila-account",
                                         "weird\tname\nwith\r{braces}[brackets]\"quotes\"\\backslash",
                                         now - 100, now - 50, 60));
