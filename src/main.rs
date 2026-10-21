@@ -97,12 +97,7 @@ fn runtime_error(msg: &str) -> ExitCode {
 ///
 /// Primary: call the real libslurmdb.so's own `slurm_api_version()` (public,
 /// slurm/slurm.h) and decode the API_CURRENT it was built with -- this comes
-/// straight from the exact .so we're about to use, no subprocess needed.
-///
-/// Fallback: if that probe fails for some reason, shell out to
-/// `sacct --version` (e.g. "slurm 24.11.7") and match on release string
-/// instead. Slower and one step removed from the actual .so we'll load, but
-/// still self-contained -- no need for the user to tell us anything.
+/// straight from the exact .so we're about to use.
 fn detect_abi(library_path: &str) -> Result<&'static Abi, String> {
     match fastsacct::slurmdb::probe_api_major(library_path) {
         Ok(api_major) => match abi::by_api_major(api_major) {
@@ -122,75 +117,12 @@ fn detect_abi(library_path: &str) -> Result<&'static Abi, String> {
                 abi::implemented_with_api_major(),
             )),
         },
-        Err(lib_exc) => match sacct_version_str() {
-            Ok(version_str) => match abi::by_version(&version_str) {
-                Some(abi) => {
-                    eprintln!(
-                        "fastsacct: auto-detected Slurm {} via `sacct --version` \
-                         (slurm_api_version() probe failed: {lib_exc})",
-                        abi.version
-                    );
-                    Ok(abi)
-                }
-                None => Err(format!(
-                    "`sacct --version` reports Slurm {version_str}, but no ABI module \
-                     is implemented for it. Implemented: {}. Pass --abi to override, \
-                     or add a new src/abi/vXX_YY.rs module (see src/abi/mod.rs docs).",
-                    abi::implemented_versions_sorted(),
-                )),
-            },
-            Err(sacct_exc) => Err(format!(
-                "couldn't auto-detect the Slurm ABI: probing {library_path:?} via \
-                 slurm_api_version() failed ({lib_exc}), and the `sacct --version` \
-                 fallback also failed ({sacct_exc}). Pass --abi explicitly; \
-                 implemented: {}",
-                abi::implemented_versions_sorted(),
-            )),
-        },
+        Err(lib_exc) => Err(format!(
+            "couldn't auto-detect the Slurm ABI: probing {library_path:?} via \
+                 slurm_api_version() failed ({lib_exc}); implemented: {}",
+            abi::implemented_versions_sorted(),
+        )),
     }
-}
-
-/// Run `sacct --version` and match the first `\d+\.\d+\.\d+`-shaped token
-/// in its stdout (the regex the Python version used), returning
-/// "MAJOR.MINOR".
-fn sacct_version_str() -> Result<String, String> {
-    let out = std::process::Command::new("sacct")
-        .arg("--version")
-        .output()
-        .map_err(|e| format!("failed to run `sacct --version`: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("`sacct --version` exited with {}", out.status));
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let bytes = text.as_bytes();
-    let digit_run_end = |from: usize| {
-        let mut i = from;
-        while i < bytes.len() && bytes[i].is_ascii_digit() {
-            i += 1;
-        }
-        i
-    };
-    for (i, b) in bytes.iter().enumerate() {
-        if *b != b'.' || i == 0 || !bytes[i - 1].is_ascii_digit() {
-            continue;
-        }
-        let major_start = {
-            let mut s = i - 1;
-            while s > 0 && bytes[s - 1].is_ascii_digit() {
-                s -= 1;
-            }
-            s
-        };
-        let minor_end = digit_run_end(i + 1);
-        // major.minor.patch?
-        if minor_end > i + 1
-            && bytes.get(minor_end) == Some(&b'.')
-            && bytes.get(minor_end + 1).is_some_and(u8::is_ascii_digit)
-        {
-            return Ok(text[major_start..minor_end].to_string());
-        }
-    }
-    Err(format!("couldn't parse `sacct --version` output: {text:?}"))
 }
 
 fn main() -> ExitCode {
