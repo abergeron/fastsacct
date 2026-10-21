@@ -4,11 +4,6 @@
 # Vendored Slurm source tree (only used to refresh mock/include/<version>/)
 /slurm/
 
-# Python-era leftovers, in case any regenerate
-__pycache__/
-*.py[oc]
-.venv/
-
 .DS_Store
 
 # Cluster validation dumps (real job data — keep local)
