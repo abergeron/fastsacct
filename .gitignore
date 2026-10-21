@@ -1,12 +1,12 @@
-# Python-generated files
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
-.pytest_cache/
+# Rust build artifacts
+/target/
+
+# Vendored Slurm source tree (only used to refresh mock/include/<version>/)
 /slurm/
 
-# Virtual environments
-.venv
+.DS_Store
+
+# Cluster validation dumps (real job data — keep local)
+/real.json
+/fastr.json
+/fastrl.json

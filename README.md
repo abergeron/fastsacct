@@ -6,71 +6,81 @@ A fast, narrow replacement for one specific `sacct` invocation shape:
 sacct -A <accounts> -S <start> -E <end> -D -X -a --json
 ```
 
-It calls `slurmdb_jobs_get()` directly via `cffi` (the same libslurmdb.so
-API `sacct` itself uses) and skips Slurm's `data_parser` plugin, which is
-the actual source of `sacct --json`'s slowness (a generic, reflection-driven
-OpenAPI serializer that walks every schema field for every job) — not the
-RPC itself.
+It calls `slurmdb_jobs_get()` directly on `libslurmdb.so` via `dlopen`/`dlsym`
+(the same API `sacct` itself uses) and skips Slurm's `data_parser` plugin,
+which is the actual source of `sacct --json`'s slowness (a generic,
+reflection-driven OpenAPI serializer that walks every schema field for every
+job) — not the RPC itself.
 
-**Status as of 2026-08-12**: working and validated against a real cluster
-(mila, Slurm 25.05.2). Emits one flat JSON schema per job (see "Output
+This is the Rust port of the original Python/cffi implementation. Same
+behavior, same output schema, same per-release ABI tables — now a single
+~1 MB binary with three crates of dependencies and no interpreter at
+runtime.
+
+**Status**: working and validated against a real cluster (mila, Slurm
+25.05.2) when this was a Python tool; the Rust port is validated field-for-
+field against that same output via the per-ABI mock suite (`cargo test`,
+see "Testing locally"). Emits one flat JSON schema per job (see "Output
 schema" below), resolving the handful of fields worth resolving (state,
 flags, qos, group, TRES, exit code) directly in that flat schema rather
 than replicating `sacct --json`'s nested one.
 
 ## Quick start
 
-This is a [uv](https://docs.astral.sh/uv/) project; `uv run` resolves and
-installs dependencies (just `cffi`) into a local venv on first use.
+Plain Cargo project, Rust edition 2024 (needs rustc >= 1.85):
 
 ```
-uv run python fastsacct.py -A <accounts> -S <start> -E <end> -D -X -a --json \
+cargo build --release
+
+target/release/fastsacct -A <accounts> -S <start> -E <end> -D -X -a --json \
     --library /path/to/libslurm.so
 ```
 
 `-D`/`-X`/`-a`/`--json` are all **required** markers, not optional flags —
-see the module docstring in `fastsacct.py` for why (fastsacct always
-behaves as if they were passed; requiring them at the CLI makes any
-sacct invocation that would behave differently fail loudly instead of
-silently mismatching). `-S`/`-E` only accept `YYYY-MM-DD[THH:MM[:SS]]` or
-`now`, not sacct's full relative-time grammar.
+see the crate docs in `src/lib.rs` for why (fastsacct always behaves as if
+they were passed; requiring them at the CLI makes any sacct invocation that
+would behave differently fail loudly instead of silently mismatching).
+`-S`/`-E` only accept `YYYY-MM-DD[THH:MM[:SS]]` or `now`, not sacct's full
+relative-time grammar.
 
 Useful flags for diagnosis, in rough order of how often you'll want them:
 
 - `--debug` — prints the resolved `job_cond` fields, the raw
-  `slurmdb_jobs_get()` result count (before any Python-side processing),
-  and which `AccountingStorageHost`/port/type `slurm_conf` resolved to
-  after `slurm_init()`. Always reach for this first when output looks
-  wrong — it tells you whether the problem is upstream of fastsacct
-  (connection/query) or in fastsacct's own formatting.
-- `--abi {24.11,25.05,25.11,26.05}` — override auto-detection (see `detect_abi()`).
+  `slurmdb_jobs_get()` result count (before any further processing), and
+  which `AccountingStorageHost`/port/type `slurm_conf` resolved to after
+  `slurm_init()`. Always reach for this first when output looks wrong — it
+  tells you whether the problem is upstream of fastsacct (connection/query)
+  or in fastsacct's own formatting.
+- `--abi {24.11,25.05,25.11,26.05}` — override auto-detection (see
+  `detect_abi()` in `src/main.rs`).
 - `--library` — path to `libslurm.so`/`libslurmdb.so`. Defaults to
   `libslurmdb.so` resolved via the normal linker search path, but most
-  clusters only ship `libslurm.so` (see the RTLD_GLOBAL gotcha below) —
-  pass the real path explicitly if in doubt.
+  clusters only ship `libslurm.so` (see the RTLD_GLOBAL gotcha in
+  ARCHITECTURE.md) — pass the real path explicitly if in doubt.
 - `--jsonl` — stream newline-delimited JSON instead of one JSON blob; see
   "Streaming output" below.
 
 ## Output schema
 
 One flat JSON object per job, `json_key: raw_value`, using mostly-literal
-C struct field names as keys (`abi/*.py`'s `JOB_FIELDS`). Most fields are
-raw — `state_reason_prev`/`qos_req`/etc. are still bare ints/strings
-straight off the wire — but a handful get cheap, no-extra-RPC-per-job
-decoding where leaving them raw would just push the same parsing work onto
-every downstream consumer:
+C struct field names as keys (`src/abi/vXX_YY.rs`'s `JOB_FIELDS` tables).
+Most fields are raw — `state_reason_prev`/`qos_req`/etc. are still bare
+ints/strings straight off the wire — but a handful get cheap,
+no-extra-RPC-per-job decoding where leaving them raw would just push the
+same parsing work onto every downstream consumer:
 
 - `qos` is resolved to a name via a one-time `slurmdb_qos_get()` id->name
   map fetched at startup — no RPC per job. Replaces `qosid` rather than
   sitting alongside it.
-- `state` is a list of decoded state name strings (e.g. `["COMPLETED"]`,
-  or `["COMPLETED", "COMPLETING"]` while cleanup is still in flight) —
+- `state` is a list of decoded state name strings (e.g. `["COMPLETED"]`, or
+  `["COMPLETED", "COMPLETING"]` while cleanup is still in flight) —
   `job_state()`'s base-state + flag-bit decode, pure bit twiddling against
   a fixed table, no RPC.
-- `flags` is a list of decoded flag name strings (e.g. `["STARTED_ON_SUBMIT"]`,
-  or `["NONE"]` when unset) — `job_flags()`'s bit-table decode, no RPC.
-- `group` is resolved to a name via a local `getgrgid` NSS lookup — no RPC.
-  `gid` is still emitted alongside it as the raw id.
+- `flags` is a list of decoded flag name strings (e.g.
+  `["STARTED_ON_SUBMIT"]`, or `["NONE"]` when unset) — `job_flags()`'s
+  bit-table decode, no RPC.
+- `group` is resolved to a name via a local `getgrgid` NSS lookup — no
+  RPC. `gid` is still emitted alongside it as the raw id.
 - `array_task_id` is `null`, not the raw `NO_VAL`/`INFINITE` sentinel
   (`4294967294`/`4294967295`), for a non-array job.
 - The epoch-timestamp/duration fields all carry a `time_` prefix —
@@ -83,37 +93,43 @@ every downstream consumer:
 - `time_timelimit` is `0`, not the raw `INFINITE` sentinel
   (`4294967295`/`0xFFFFFFFF`), for a job with no time limit.
 - `tres_alloc_str`/`tres_req_str` (e.g. `"1=4,2=17179869184,1001=2"`) are
-  still emitted raw, but also expanded into `allocated_<type>[_<name>]`/
-  `requested_<type>[_<name>]` fields (e.g. `allocated_cpu`, `allocated_mem`,
-  `allocated_gres_gpu`) using a one-time `slurmdb_tres_get()` id->name map.
-  Sentinel counts that round-trip through the wire's unsigned format (e.g.
-  `18446744073709551614`, which is really `-2`) are reinterpreted back to
-  a real negative number — see `parse_tres()`. A GRES name's
-  optional model/type suffix (e.g. `"gpu:a100"`) is kept out of the key —
-  always `allocated_gres_gpu`, never `allocated_gres_gpu_a100` — and
-  surfaced instead as a separate `allocated_gres_gpu_type: "a100"` field
-  when present.
+  still emitted raw, but also expanded into
+  `allocated_<type>[_<name>]`/`requested_<type>[_<name>]` fields (e.g.
+  `allocated_cpu`, `allocated_mem`, `allocated_gres_gpu`) using a one-time
+  `slurmdb_tres_get()` id->name map. Sentinel counts that round-trip
+  through the wire's unsigned format (e.g. `18446744073709551614`, which
+  is really `-2`) are reinterpreted back to a real negative number — see
+  `parse_tres()` in `src/decode.rs`. A GRES name's optional model/type
+  suffix (e.g. `"gpu:a100"`) is kept out of the key — always
+  `allocated_gres_gpu`, never `allocated_gres_gpu_a100` — and surfaced
+  instead as a separate `allocated_gres_gpu_type: "a100"` field when
+  present.
 - `exitcode` (a Unix wait-status int) is still emitted raw, but also
-  expanded into `exitcode_return_code`/`exitcode_signal` — the plain
-  number (or `null` if not applicable) via `process_exit_code()`'s
-  WIFEXITED/WIFSIGNALED decoding. `derived_ec` is left as raw only, for
-  now.
+  expanded into `exitcode_return_code`/`exitcode_signal` — the plain number
+  (or `null` if not applicable) via `process_exit_code()`'s
+  WIFEXITED/WIFSIGNALED decoding. `derived_ec` is left as raw only, for now.
 
 Good enough if your downstream consumer is your own code and you're fine
 post-processing the remaining raw fields yourself.
 
+Field order within each job object is stable and follows the ABI table
+(`serde_json`'s `preserve_order` feature), matching what the Python version
+emitted. The JSON itself is compact (`{"k":1,"k2":[...]}`, no
+whitespace-padding); the old Python output was `json.dumps`-default
+(spaces after `:` and `,`). Anything that parses JSON is unaffected;
+something diffing bytes would notice.
+
 ## Streaming output (`--jsonl`)
 
-By default fastsacct writes one `{"meta": {...}, "jobs": [...]}` JSON blob,
-built entirely in memory and written out with a single `json.dump()` once
-every job has been fetched and decoded. Pass `--jsonl` to instead stream
-newline-delimited JSON: a `{"meta": {...}}` line first, then one job object
-per line — each line written and flushed as soon as that job is decoded,
-so a downstream reader can start processing jobs without waiting for the
-whole run to finish, and without ever holding the full response in memory.
+By default fastsacct writes one `{"meta": {...}, "jobs": [...]}` JSON blob.
+Pass `--jsonl` to instead stream newline-delimited JSON: a `{"meta": ...}`
+line first, then one job object per line — each line written and flushed as
+soon as that job is decoded, so a downstream reader can start processing
+jobs without waiting for the whole run to finish, and without ever holding
+the full response in memory.
 
 ```bash
-uv run python fastsacct.py -A <accounts> -S <start> -E <end> -D -X -a \
+target/release/fastsacct -A <accounts> -S <start> -E <end> -D -X -a \
     --json --jsonl --library /path/to/libslurm.so \
 | python3 -c '
 import json, sys
@@ -126,70 +142,76 @@ for line in sys.stdin:
 
 Job names on a real cluster can contain almost anything short of a NUL
 byte — newlines, tabs, `{`/`}`/`[`/`]`, you name it. That's safe here
-without any extra escaping on fastsacct's part: `json.dumps` (used for
-every line, meta and job alike) already escapes every character JSON
-requires escaped — quotes, backslashes, and every control character below
-`0x20` (`\n`, `\t`, `\r`, and the rest as `\n`/`\t`/`\r`-style shorthand
-where one exists, `\u00XX` otherwise) — so no job's JSON text can ever
-contain a literal newline, and each line is a complete, independently
-parseable JSON value. A plain `for line in sys.stdin: json.loads(line)`
-loop (as above) is all a Python reader needs; no special JSON-streaming
-library required on either end.
+without any extra escaping on fastsacct's part: the JSON writer escapes
+every character JSON requires escaped — quotes, backslashes, and every
+control character below `0x20` (`\n`, `\t`, `\r`, and the rest as
+`\n`/`\t`/`\r`-style shorthand where one exists, `\u00XX` otherwise) — so
+no job's JSON text can ever contain a literal newline, and each line is a
+complete, independently parseable JSON value. A plain
+`for line in sys.stdin: json.loads(line)` loop (as above) is all a Python
+reader needs; no special JSON-streaming library required on either end.
 
 Each line has no trailing content and no embedded raw newline, so `wc -l`
-on the output equals the number of jobs plus one (the meta line) —
-useful for a quick sanity check that nothing got mangled in between.
+on the output equals the number of jobs plus one (the meta line) — useful
+for a quick sanity check that nothing got mangled in between.
 
 ## Testing locally (no cluster needed)
 
 ```bash
-uv run pytest
+cargo test
 ```
 
-That's the whole test suite: for each supported ABI, it compiles
-`mock/mock_libslurmdb.c` — a fake `libslurmdb.so` — against
+That's the whole test suite: unit tests for the decode helpers/time
+parsing/offset tables plus `tests/mock_e2e.rs`, which — for each supported
+ABI — compiles `mock/mock_libslurmdb.c` (a fake `libslurmdb.so`) against
 `mock/include/<version>/slurm/{slurm.h,slurmdb.h,slurm_errno.h}` (real
 headers vendored from that release's own `slurm-<version>-*` tag, plus a
 hand-written `slurm_version.h` stub — that one file is normally generated
-by `configure` and isn't present in a bare checkout), points
-`fastsacct.py` at the resulting `.so`, and checks the flat JSON output
+by `configure` and isn't present in a bare checkout), points the built
+binary at the resulting `.so`, and checks the flat JSON output
 field-by-field against what `mock_libslurmdb.c`'s `make_job()` actually
 wrote — including the fields that only exist on some releases (`lft` on
 24.11 only; `resv_req`/`segment_size` on 25.05+ only; `exclusive`/
-`oversubscribe`/`sluid` on 26.05+ only, see `abi/v24_11.py`'s and
-`abi/v26_05.py`'s docstrings). Requires a C compiler (`cc`/`clang`/`gcc`) on
-`PATH`; the whole suite is skipped if none is found.
+`oversubscribe`/`sluid` on 26.05+ only; see the per-module docs in
+`src/abi/`). Requires a C compiler (`cc`/`clang`/`gcc`) on `PATH`; the e2e
+tests skip themselves if none is found.
 
-Using a _different_ release's headers per version (rather than one
-struct reused everywhere) matters here: `slurmdb_job_rec_t` is not
-actually byte-for-byte identical across 24.11/25.05/25.11/26.05 — 24.11 has
-an extra field and is missing two that 25.05+ added, and 26.05 adds three
-more on top of that (see `abi/v24_11.py`'s and `abi/v26_05.py`'s
-docstrings) — so building 24.11's mock against a 25.05-shaped struct would
+Using a _different_ release's headers per version (rather than one struct
+reused everywhere) matters here: `slurmdb_job_rec_t` is not actually
+byte-for-byte identical across 24.11/25.05/25.11/26.05 — 24.11 has an extra
+field and is missing two that 25.05+ added, and 26.05 adds three more on
+top of that — so building 24.11's mock against a 25.05-shaped struct would
 silently validate the wrong offsets. Building each mock against its own
 release's real header is what makes a passing test mean anything.
 
 The mock exercises both directions of the ABI: fastsacct writes a
-`job_cond` → mock prints what it received (confirms Python wrote at the
-right offsets); mock fabricates job records → fastsacct reads them back
-(confirms Python reads from the right offsets). It also fakes
+`job_cond` → mock prints what it received (confirms Rust wrote at the right
+offsets); mock fabricates job records → fastsacct reads them back
+(confirms Rust reads from the right offsets). It also fakes
 `slurmdb_tres_get()`/`slurmdb_qos_get()` with real id/name tables matching
 what the fabricated jobs use, so the flat schema's `qos`/`allocated_*`/
 `requested_*` fields have something real to resolve.
 
-It does **not** prove any `abi/vXX_YY.py` matches whatever real
-`libslurmdb.so` is on a given cluster node — the vendored headers are
-real, but only fastsacct's own harness (arg parsing, list walking, JSON
-emission, formatting logic) against them is under test.
+It does **not** prove any `src/abi/vXX_YY.rs` matches whatever real
+`libslurmdb.so` is on a given cluster node — the vendored headers are real,
+but only fastsacct's own harness (arg parsing, list walking, JSON emission,
+formatting logic) against them is under test.
 
-For a one-off manual run against a single ABI without pytest:
+For a one-off manual run against a single ABI (or all four, plus a couple
+of smoke checks):
+
+```bash
+./smoke.sh   # builds nothing; expects /tmp/fa-mocks/lib_<version>.so
+```
+
+To build one mock by hand:
 
 ```bash
 clang -shared -fPIC -Imock/include/25.05 -DMOCK_API_MAJOR=43 \
-    -o /tmp/mock_libslurmdb.so mock/mock_libslurmdb.c
+    -o /tmp/fa-mocks/lib_25.05.so mock/mock_libslurmdb.c
 
-TZ=UTC uv run python fastsacct.py -S 2026-01-01 -E 2026-01-02 -D -X -a \
-    --json --library /tmp/mock_libslurmdb.so --debug
+TZ=UTC ./target/debug/fastsacct -S 2026-01-01 -E 2026-01-02 -D -X -a \
+    --json --library /tmp/fa-mocks/lib_25.05.so --debug
 ```
 
 Swap `-Imock/include/25.05 -DMOCK_API_MAJOR=43` for
@@ -197,12 +219,18 @@ Swap `-Imock/include/25.05 -DMOCK_API_MAJOR=43` for
 `-Imock/include/25.11 -DMOCK_API_MAJOR=44`, or
 `-Imock/include/26.05 -DMOCK_API_MAJOR=45` to target the other ABIs —
 `MOCK_API_MAJOR` must match the header set (it picks the mock's
-`slurm_api_version()` return value _and_, via `#if MOCK_API_MAJOR == 42`
-in `mock_libslurmdb.c`, which of the version-specific job fields to set).
+`slurm_api_version()` return value _and_, via `#if MOCK_API_MAJOR == 42` in
+`mock_libslurmdb.c`, which of the version-specific job fields to set).
+
+`cli-checks.sh` re-runs the CLI error-path checks (missing markers,
+non-UTC TZ, bad `--abi`, …) against `./target/debug/fastsacct` and the
+mocks in `/tmp/fa-mocks`.
 
 ## Known limitations / open items
 
 - Only `-A`/`-S`/`-E` are implemented as real filters; everything else
   about a `sacct` invocation this doesn't recognize is a hard error by
-  design (see the module docstring) — this is a narrow drop-in for one
-  invocation shape, not a general `sacct` replacement.
+  design (see the crate docs) — this is a narrow drop-in for one invocation
+  shape, not a general `sacct` replacement.
+- Timezones: the process must run with the system timezone resolved to UTC
+  (`TZ=UTC`), same as the Python version — see `require_utc_timezone()`.
