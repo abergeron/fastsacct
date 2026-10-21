@@ -10,3 +10,8 @@ __pycache__/
 .venv/
 
 .DS_Store
+
+# Cluster validation dumps (real job data — keep local)
+/real.json
+/fastr.json
+/fastrl.json
