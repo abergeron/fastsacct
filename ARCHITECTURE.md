@@ -94,6 +94,20 @@ an `INT64`). After that fix, the diffed output matched real `sacct --json`
 exactly. In the Rust port the same fix is `u64::parse -> as i64` and
 `decode::tests::parse_tres_resolves_and_sign_fixes` pins it.
 
+The Rust port re-ran this methodology with a script instead of by hand:
+`cluster-check.sh` captures both outputs for one query on a real cluster
+and `cluster_diff.py` diffs all 83 flat fields against the nested
+data_parser schema (`time.*`, `tres.allocated`, wrapped
+`{set,infinite,number}` scalars, MEM_PER_CPU bit-63 `req_mem`, TRES
+strings rebuilt with the wire's unsigned counts, decoded exit-code pair,
+`state_reason_prev` decoded via the reason table parsed from the vendored
+slurm source). On a 25.11 cluster, 1119 jobs matched on every comparable
+field; the only differences were `time_elapsed` ticking for RUNNING jobs
+between the two dumps (both tools compute it at query time), and NULL
+`char *` fields emitting JSON `null` where sacct prints `""` — the
+latter is the intended fastsacct schema, so the diff treats the two as
+equivalent.
+
 ## Gotchas worth knowing before touching this again
 
 Each of these cost real time to track down and is easy to reintroduce if
