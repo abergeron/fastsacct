@@ -56,10 +56,12 @@ pub enum FieldKind {
     JobState,
     /// `uint32_t` qosid -> name via the one-time `slurmdb_qos_get()` map.
     QosName,
-    /// `uint32_t`, NO_VAL/INFINITE sentinels collapsed to null.
+    /// `uint32_t`, NO_VAL/INFINITE sentinels collapsed to null ("unset") --
+    /// mirrors what sacct's data_parser emits for a UINT32_NO_VAL field.
     NoVal32,
-    /// `uint32_t`, INFINITE ("no limit") collapsed to 0.
-    U32Inf0,
+    /// `uint32_t`, INFINITE ("no limit") collapsed to 0, NO_VAL ("unset" --
+    /// e.g. timelimit's "Partition_Limit" state) collapsed to null.
+    U32Inf0NullNoVal,
 }
 
 /// One flat-output field: JSON key, byte offset into `slurmdb_job_rec_t`,

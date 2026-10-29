@@ -81,8 +81,9 @@ same parsing work onto every downstream consumer:
   bit-table decode, no RPC.
 - `group` is resolved to a name via a local `getgrgid` NSS lookup — no
   RPC. `gid` is still emitted alongside it as the raw id.
-- `array_task_id` is `null`, not the raw `NO_VAL`/`INFINITE` sentinel
-  (`4294967294`/`4294967295`), for a non-array job.
+- `array_task_id` and `het_job_offset` are `null`, not the raw
+  `NO_VAL`/`INFINITE` sentinel (`4294967294`/`4294967295`), for a non-array
+  / non-het job.
 - The epoch-timestamp/duration fields all carry a `time_` prefix —
   `time_eligible`, `time_end`, `time_elapsed`, `time_start`, `time_submit`,
   `time_suspended`, `time_timelimit` — values are still the same raw
@@ -91,7 +92,14 @@ same parsing work onto every downstream consumer:
   `user_cpu_sec`, and their `_usec` siblings) are left as-is — they're
   already qualified by `sys_`/`tot_`/`user_`.
 - `time_timelimit` is `0`, not the raw `INFINITE` sentinel
-  (`4294967295`/`0xFFFFFFFF`), for a job with no time limit.
+  (`4294967295`/`0xFFFFFFFF`), for a job with an explicitly unlimited time
+  limit, and `null` — not the raw `NO_VAL` sentinel
+  (`4294967294`/`0xFFFFFFFE`) — when the limit was never resolved from any
+  source and is whatever the partition's `MaxTime` imposes (sacct prints
+  this as `Partition_Limit`, truncated to `Partition+` at its default
+  column width). `priority` follows the same `NO_VAL`→`null` rule (it's
+  the same UINT32_NO_VAL type in sacct's data_parser; a stored record
+  practically always has a real priority).
 - `tres_alloc_str`/`tres_req_str` (e.g. `"1=4,2=17179869184,1001=2"`) are
   still emitted raw, but also expanded into
   `allocated_<type>[_<name>]`/`requested_<type>[_<name>]` fields (e.g.

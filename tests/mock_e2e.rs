@@ -114,6 +114,9 @@ struct MockJobSpec {
     jobname: &'static str,
     delta: (i64, i64),
     timelimit: u32,
+    /// Job carries NO_VAL sentinels beyond make_job()'s plain fields
+    /// (het_job_offset unset) -- must match the mock's job 1005.
+    sentinels: bool,
 }
 
 const MOCK_NOW: &str = "2026-01-02";
@@ -126,6 +129,7 @@ fn mock_job_specs() -> Vec<MockJobSpec> {
             jobname: "train_job",
             delta: (3600, 1800),
             timelimit: 60,
+            sentinels: false,
         },
         MockJobSpec {
             jobid: 1002,
@@ -133,15 +137,17 @@ fn mock_job_specs() -> Vec<MockJobSpec> {
             jobname: "eval_job",
             delta: (1800, 900),
             timelimit: 60,
+            sentinels: false,
         },
-        // No time limit -- exercises the INFINITE-sentinel-to-0 mapping
-        // for U32Inf0 fields.
+        // No time limit -- exercises the INFINITE->0 / NO_VAL->null
+        // mapping for U32Inf0NullNoVal fields (job 1005 carries NO_VAL).
         MockJobSpec {
             jobid: 1003,
             account: "other-account",
             jobname: "sweep_job",
             delta: (7200, 6900),
             timelimit: decode::INFINITE,
+            sentinels: false,
         },
         // Deliberately nasty job name (tab, newline, CR, braces, brackets,
         // quotes, backslash) -- exercises the --jsonl one-JSON-value-per-
@@ -153,6 +159,18 @@ fn mock_job_specs() -> Vec<MockJobSpec> {
             jobname: "weird\tname\nwith\r{braces}[brackets]\"quotes\"\\backslash",
             delta: (100, 50),
             timelimit: 60,
+            sentinels: false,
+        },
+        // NO_VAL sentinels -- timelimit "Partition_Limit" (never resolved)
+        // + unset het offset; both must come out as null. Must match
+        // mock_libslurmdb.c's slurmdb_jobs_get() job 1005.
+        MockJobSpec {
+            jobid: 1005,
+            account: "mila-account",
+            jobname: "unset_limit_job",
+            delta: (60, 30),
+            timelimit: decode::NO_VAL,
+            sentinels: true,
         },
     ]
 }
@@ -206,6 +224,9 @@ fn expected_job(spec: &MockJobSpec, now: i64, version: &str) -> Value {
     put("sys_cpu_sec", json!(20));
     put("lineage", json!("/some/lineage/path"));
     put("work_dir", json!("/home/someuser"));
+    if spec.sentinels {
+        put("het_job_offset", json!(decode::NO_VAL as u64));
+    }
     match version {
         "24.11" => {
             put("lft", json!(7));
@@ -252,13 +273,17 @@ fn expected_job(spec: &MockJobSpec, now: i64, version: &str) -> Value {
                     json!(ival)
                 }
             }
-            abi::FieldKind::U32Inf0 => {
+            abi::FieldKind::U32Inf0NullNoVal => {
                 let ival = val.and_then(Value::as_u64).unwrap_or(0);
-                json!(if ival == decode::INFINITE as u64 {
-                    0
+                if ival == decode::NO_VAL as u64 {
+                    Value::Null
                 } else {
-                    ival
-                })
+                    json!(if ival == decode::INFINITE as u64 {
+                        0
+                    } else {
+                        ival
+                    })
+                }
             }
             abi::FieldKind::U16
             | abi::FieldKind::U32
@@ -425,7 +450,12 @@ fn jsonl_output() {
             .map(|j| &j["name"])
             .collect();
         assert_eq!(jsonl_names, blob_names);
-        let weird = blob_names.last().unwrap().as_str().unwrap();
+        let weird = jobs
+            .iter()
+            .find(|j| j["job_id"] == json!(1004))
+            .unwrap()["name"]
+            .as_str()
+            .unwrap();
         assert!(weird.contains('\t') && weird.contains('\n') && weird.contains('\r'));
     }
 }

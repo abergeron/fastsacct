@@ -279,6 +279,15 @@ list_t *slurmdb_jobs_get(void *db_conn, slurmdb_job_cond_t *job_cond)
     slurm_list_append(result, make_job(1004, "mila-account",
                                         "weird\tname\nwith\r{braces}[brackets]\"quotes\"\\backslash",
                                         now - 100, now - 50, 60));
+    /* NO_VAL (0xFFFFFFFE) sentinels -- a job whose time limit was never
+     * resolved ("Partition_Limit"/"Partition+" in sacct) and whose het
+     * offset is unset. Exercises fastsacct's NO_VAL->null collapse for
+     * time_timelimit/het_job_offset (see tests/mock_e2e.rs). */
+    slurmdb_job_rec_t *sentinel_job = make_job(1005, "mila-account",
+                                               "unset_limit_job",
+                                               now - 60, now - 30, NO_VAL);
+    sentinel_job->het_job_offset = NO_VAL;
+    slurm_list_append(result, sentinel_job);
 
     return result;
 }

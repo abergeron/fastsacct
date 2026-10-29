@@ -829,13 +829,26 @@ impl Slurmdb {
                             Value::from(u64::from(ival))
                         }
                     }
-                    FieldKind::U32Inf0 => {
-                        // INFINITE sentinel collapsed to 0 -- for a u32
-                        // field where INFINITE means "no limit" (e.g.
-                        // time_timelimit for a job with no time limit), not
-                        // "unset"/NO_VAL.
+                    FieldKind::U32Inf0NullNoVal => {
+                        // INFINITE collapsed to 0 -- for a u32 field where
+                        // INFINITE means "no limit" (e.g. time_timelimit
+                        // for a job with an explicitly unlimited limit),
+                        // not "unset". NO_VAL is a distinct third state
+                        // ("never set -- the limit is whatever the
+                        // partition imposes", printed as "Partition_Limit"
+                        // by sacct, truncated to "Partition+" at the
+                        // default column width) and collapses to null,
+                        // like NoVal32.
                         let ival = (base.add(d.offset) as *const u32).read_unaligned();
-                        Value::from(u64::from(if ival == decode::INFINITE { 0 } else { ival }))
+                        if ival == decode::NO_VAL {
+                            Value::Null
+                        } else {
+                            Value::from(u64::from(if ival == decode::INFINITE {
+                                0
+                            } else {
+                                ival
+                            }))
+                        }
                     }
                 }
             };

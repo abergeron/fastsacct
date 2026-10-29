@@ -95,8 +95,12 @@ pub(crate) struct JobRec {
 /// (json_key, offset, kind) -- kind drives how `Slurmdb::job_to_value()`
 /// converts the raw value. `Str` fields are NULL-safe; the plain numeric
 /// kinds (`U16`/`U32`/`U64`/`Time`) map directly to their C type; the rest
-/// (`Group`, `Flags`, `JobState`, `QosName`, `NoVal32`, `U32Inf0`) get the
-/// cheap, no-RPC-per-job decoding described in `crate::decode`.
+/// (`Group`, `Flags`, `JobState`, `QosName`, `NoVal32`, `U32Inf0NullNoVal`)
+/// get the cheap, no-RPC-per-job decoding described in `crate::decode`.
+/// `NoVal32`/`U32Inf0NullNoVal` are marked per sacct's data_parser types
+/// (v0.0.44 parsers.c PARSER_ARRAY(JOB)): the fields typed UINT32_NO_VAL
+/// there -- array_task_id, het_job_offset, priority, timelimit -- are the
+/// only ones that can carry a NO_VAL/INFINITE sentinel in a stored record.
 pub static JOB_FIELDS: &[crate::abi::FieldDesc] = crate::job_fields!(
     JobRec,
     ("account", account, Str),
@@ -128,7 +132,7 @@ pub static JOB_FIELDS: &[crate::abi::FieldDesc] = crate::job_fields!(
     ("gid", gid, U32),
     ("group", gid, Group),
     ("het_job_id", het_job_id, U32),
-    ("het_job_offset", het_job_offset, U32),
+    ("het_job_offset", het_job_offset, NoVal32),
     ("job_id", jobid, U32),
     ("name", jobname, Str),
     ("lineage", lineage, Str),
@@ -136,7 +140,7 @@ pub static JOB_FIELDS: &[crate::abi::FieldDesc] = crate::job_fields!(
     ("mcs_label", mcs_label, Str),
     ("nodes", nodes, Str),
     ("partition", partition, Str),
-    ("priority", priority, U32),
+    ("priority", priority, U32Inf0NullNoVal),
     ("qos", qosid, QosName),
     ("qos_req", qos_req, Str),
     ("req_cpus", req_cpus, U32),
@@ -160,7 +164,7 @@ pub static JOB_FIELDS: &[crate::abi::FieldDesc] = crate::job_fields!(
     ("system_comment", system_comment, Str),
     ("sys_cpu_sec", sys_cpu_sec, U64),
     ("sys_cpu_usec", sys_cpu_usec, U64),
-    ("time_timelimit", timelimit, U32Inf0),
+    ("time_timelimit", timelimit, U32Inf0NullNoVal),
     ("tot_cpu_sec", tot_cpu_sec, U64),
     ("tot_cpu_usec", tot_cpu_usec, U64),
     ("tres_alloc_str", tres_alloc_str, Str),

@@ -90,22 +90,27 @@ class Diff:
             self.mismatches.append((field, jid, fa_v, sa_v))
 
     def eq_wrapped(self, field, jid, fa_v, wrapped, sentinels=(NO_VAL, INFINITE),
-                   null_on_unset=False, zero_on_inf=False):
+                   null_on_unset=False, zero_on_inf=False, null_no_val_inf_zero=False):
         """Compare fastsacct's raw value against sacct's {set,infinite,number}
         wrapper. null_on_unset: fastsacct collapses NO_VAL/INFINITE to null
-        for this field (NoVal32); zero_on_inf: fastsacct maps INFINITE to 0
-        (U32Inf0, i.e. timelimit). Otherwise the raw sentinel is emitted."""
+        for this field (NoVal32). zero_on_inf: fastsacct maps INFINITE to 0
+        (i.e. timelimit). null_no_val_inf_zero: fastsacct maps NO_VAL to
+        null and INFINITE to 0 (U32Inf0NullNoVal, i.e. priority). Otherwise
+        the raw sentinel is emitted."""
         self.checked[field] = self.checked.get(field, 0) + 1
         kind, num = unwrap(wrapped)
         if kind == "v":
             ok = fa_v == num
         elif kind == "inf":
-            if zero_on_inf:
+            if zero_on_inf or null_no_val_inf_zero:
                 ok = fa_v == 0
             else:
                 ok = fa_v is None if null_on_unset else fa_v in sentinels
-        else:  # unset
-            ok = fa_v is None if null_on_unset else fa_v in sentinels
+        else:  # unset (NO_VAL)
+            if null_no_val_inf_zero:
+                ok = fa_v is None
+            else:
+                ok = fa_v is None if null_on_unset else fa_v in sentinels
         if not ok:
             self.mismatches.append((field, jid, fa_v, wrapped))
 
@@ -225,11 +230,12 @@ DIRECT = {
 }
 
 # wrapped sacct scalars -> per-field fastsacct sentinel policy
-# (array_task_id is NoVal32 -> null; het_job_offset/priority are raw U32)
+# (array_task_id/het_job_offset are NoVal32 -> null; priority is
+# U32Inf0NullNoVal -> NO_VAL null, INFINITE 0)
 WRAPPED = {
-    "priority": ("priority", {}),
+    "priority": ("priority", {"null_no_val_inf_zero": True}),
     "array_task_id": ("array.task_id", {"null_on_unset": True}),
-    "het_job_offset": ("het.job_offset", {}),
+    "het_job_offset": ("het.job_offset", {"null_on_unset": True}),
 }
 
 # fastsacct fields with no sacct --json counterpart (name-resolved or absent)
@@ -335,10 +341,11 @@ def compare_all(fa_jobs, sa_jobs):
         d.eq_sentinel("wckey", jid, fa.get("wckey"), (unwrap(dig(s, "wckey.wckey"))[1]))
 
         # --- time_timelimit: sacct wraps; fastsacct maps INFINITE -> 0
+        # and NO_VAL (sacct's "Partition_Limit") -> null
         lim = dig(s, "time.limit")
         if lim is not None:
             d.eq_wrapped("time_timelimit", jid, fa.get("time_timelimit"), lim,
-                         zero_on_inf=True)
+                         null_no_val_inf_zero=True)
 
         # --- req_mem: MEM_PER_CPU bit-63 tag vs sacct's split fields
         fa_mem = fa.get("req_mem")
